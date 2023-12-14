@@ -174,20 +174,18 @@ class DropBoxApp:
                 json.dump(self.backup, f)
 
     def prepare_client(self, team_access):
-        if team_access:
-            self.dropbox_team = DropboxTeam(
-                oauth2_access_token=self.access_token,
-                oauth2_refresh_token=self.refresh_token,
-                app_key=self.app_key
-            )
-            self.admin = self.dropbox_team.team_token_get_authenticated_admin().admin_profile
-            self.dropbox = self.dropbox_team.as_admin(self.admin.team_member_id)
-        else:
-            self.dropbox = Dropbox(
-                oauth2_access_token=self.access_token,
-                oauth2_refresh_token=self.refresh_token,
-                app_key=self.app_key
-            )
+        self.dropbox_team = DropboxTeam(
+            oauth2_access_token=self.access_token,
+            oauth2_refresh_token=self.refresh_token,
+            app_key=self.app_key
+        )
+        self.admin = self.dropbox_team.team_token_get_authenticated_admin().admin_profile
+        # self.dropbox = self.dropbox_team.as_admin(self.admin.team_member_id)
+        self.dropbox = Dropbox(
+            oauth2_access_token=self.access_token,
+            oauth2_refresh_token=self.refresh_token,
+            app_key=self.app_key
+        )
 
     def auth(self, team_access, retry=False):
         if self.access_token and self.refresh_token:
@@ -444,12 +442,15 @@ class DropBoxApp:
                 exit()
 
     def get_team_member(self):
-        contents = self.dropbox_team.team_members_list()
+        client = self.dropbox_team
+        # client = self.dropbox_team.as_admin(self.admin.team_member_id)
+
+        contents = client.team_members_list()
         for member in contents.members:
             print(member)
         while True:
             if contents.has_more:
-                contents = self.dropbox_team.team_members_list_continue(cursor=contents.cursor)
+                contents = client.team_members_list_continue(cursor=contents.cursor)
                 for member in contents.members:
                     print(member)
             else:
