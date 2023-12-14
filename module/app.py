@@ -91,7 +91,7 @@ class Folder:
 
     def update_path(self, path):
         self.name = path.split("/")[-1]
-        self.path_display = path
+        self.path_display = path if path else '/'
         self.path_lower = path
 
     def done(self):
