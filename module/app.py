@@ -312,16 +312,19 @@ class DropBoxApp:
         # self.ws = self.wb.active
         self.live_process.start()
 
-        namespace: NamespaceMetadata
-        for namespace in self.team_namespaces:
-            namespace_root = Folder(namespace=namespace.name)
-            namespace_root.id = f'namespace_id:{namespace.namespace_id}'
-            namespace_root.update_path(path)
-            path_root = self.dropbox.with_path_root(PathRoot.root(namespace.namespace_id))
-            self.get_path(path_root=path_root, folder=namespace_root)
+        self.get_path(self.dropbox, self.root)
+
+
+        # namespace: NamespaceMetadata
+        # for namespace in self.team_namespaces:
+        #     namespace_root = Folder(namespace=namespace.name)
+        #     namespace_root.id = f'namespace_id:{namespace.namespace_id}'
+        #     namespace_root.update_path(path)
+        #     path_root = self.dropbox.with_path_root(PathRoot.root(namespace.namespace_id))
+        #     self.get_path(path_root=path_root, folder=namespace_root)
 
     def get_namespaces(self):
-        r: TeamNamespacesListResult = self.dropbox.team_namespaces_list()
+        r: TeamNamespacesListResult = self.dropbox_team.team_namespaces_list()
         namespace: NamespaceMetadata
         for namespace in r.namespaces:
             if namespace.namespace_type.is_team_folder():
@@ -416,22 +419,45 @@ class DropBoxApp:
         return f"{num:.1f}Yi{suffix}"
 
     def test(self):
-        print(self.dropbox.team_namespaces_list())
-        # contents = self.dropbox.files_list_folder(path="", recursive=True)
-        # print(contents)
-        # for content in contents.entries:
-        #     print(content.path_display)
-        #     time.sleep(.1)
-        # print("----------------")
-        # while True:
-        #     if contents.has_more:
-        #         contents = self.dropbox.files_list_folder_continue(cursor=contents.cursor)
-        #         for content in contents.entries:
-        #             print(content.path_display)
-        #             time.sleep(.1)
-        #         print("----------------")
-        #     else:
-        #         exit()
+        contents = self.dropbox.files_list_folder(path="", recursive=False)
+        for content in contents.entries:
+            print(content.path_display)
+        while True:
+            if contents.has_more:
+                contents = self.dropbox.files_list_folder_continue(cursor=contents.cursor)
+                for content in contents.entries:
+                    print(content.path_display)
+            else:
+                exit()
+
+    @staticmethod
+    def get_files_list_folder(client):
+        contents = client.files_list_folder(path="", recursive=False)
+        for content in contents.entries:
+            print(content.path_display)
+        while True:
+            if contents.has_more:
+                contents = client.files_list_folder_continue(cursor=contents.cursor)
+                for content in contents.entries:
+                    print(content.path_display)
+            else:
+                exit()
+
+    def get_team_member(self):
+        contents = self.dropbox_team.team_members_list()
+        for member in contents.members:
+            print(member)
+        while True:
+            if contents.has_more:
+                contents = self.dropbox_team.team_members_list_continue(cursor=contents.cursor)
+                for member in contents.members:
+                    print(member)
+            else:
+                exit()
+
+    def get_member_space(self, member_id):
+        client = self.dropbox_team.as_user(member_id)
+        self.get_files_list_folder(client=client)
 
     def get_path(self, path_root, folder=None):
         if folder.id in self.folders:
