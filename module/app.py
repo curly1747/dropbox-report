@@ -302,7 +302,7 @@ class DropBoxApp:
         self.status = 'DONE'
         self.output_file.close()
 
-    def report(self, output_name):
+    def report(self, output_name, path=''):
         self.output_name = output_name
 
         self.get_namespaces()
@@ -316,7 +316,7 @@ class DropBoxApp:
         for namespace in self.team_namespaces:
             namespace_root = Folder(namespace=namespace.name)
             namespace_root.id = f'namespace_id:{namespace.namespace_id}'
-            namespace_root.update_path('')
+            namespace_root.update_path(path)
             path_root = self.dropbox.with_path_root(PathRoot.root(namespace.namespace_id))
             self.get_path(path_root=path_root, folder=namespace_root)
 
