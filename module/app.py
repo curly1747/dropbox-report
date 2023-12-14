@@ -289,37 +289,23 @@ class DropBoxApp:
                           created_at, last_modified, files, members, groups, exec_time)
         return table
 
-    def run(self, output_name, path=''):
+    def report_path(self, output_name, path='', max_level=9999):
         self.output_name = output_name
         self.root.update_path(path)
         self.check_backup()
         # self.wb = openpyxl.load_workbook(f'output/{self.output_name}.xlsx')
         # self.ws = self.wb.active
         self.live_process.start()
-        self.get_path(self.dropbox, self.root)
+        self.get_path(self.dropbox, folder=self.root, max_level=max_level)
         self.status = 'DONE'
         self.output_file.close()
 
-    def report(self, output_name, path=''):
+    def report(self, output_name, max_level=9999):
         self.output_name = output_name
-
-        self.get_namespaces()
         self.check_backup()
         self.root.update_path('')
-        # self.wb = openpyxl.load_workbook(f'output/{self.output_name}.xlsx')
-        # self.ws = self.wb.active
         self.live_process.start()
-
-        self.get_path(self.dropbox, self.root)
-
-
-        # namespace: NamespaceMetadata
-        # for namespace in self.team_namespaces:
-        #     namespace_root = Folder(namespace=namespace.name)
-        #     namespace_root.id = f'namespace_id:{namespace.namespace_id}'
-        #     namespace_root.update_path(path)
-        #     path_root = self.dropbox.with_path_root(PathRoot.root(namespace.namespace_id))
-        #     self.get_path(path_root=path_root, folder=namespace_root)
+        self.get_path(self.dropbox, folder=self.root, max_level=max_level)
 
     def get_namespaces(self):
         r: TeamNamespacesListResult = self.dropbox_team.team_namespaces_list()
@@ -460,29 +446,30 @@ class DropBoxApp:
         client = self.dropbox_team.as_user(member_id)
         self.get_files_list_folder(client=client)
 
-    def get_path(self, path_root, folder=None):
+    def get_path(self, client, folder=None, max_level=1000, current_level=0):
         if folder.id in self.folders:
             if self.folders[folder.id].status == "DONE":
                 return self.folders[folder.id], True
 
-        contents = path_root.files_list_folder(path=folder.path_lower)
+        contents = client.files_list_folder(path=folder.path_lower)
         for content in contents.entries:
             if isinstance(content, FolderMetadata):
-                new_folder = Folder(obj=content, namespace=folder.namespace)
-                new_folder.parent = folder
-                self.update_backup(new_folder)
-                if content.shared_folder_id:
-                    r = self.dropbox.sharing_list_folder_members(shared_folder_id=content.shared_folder_id)
-                    for member in r.users:
-                        new_folder.members.append(f'({member.access_type._tag[0].upper()}){member.user.email}')
-                    for group in r.groups:
-                        print(group)
-                        # new_folder.groups.append(f'({group.access_type._tag[0].upper()}){group.group.group_name}')
-                new_folder, is_backup = self.get_path(path_root, new_folder)
-                if not is_backup:
-                    folder.add_folder(new_folder)
+                if current_level <= max_level:
+                    new_folder = Folder(obj=content, namespace=folder.namespace)
+                    new_folder.parent = folder
+                    self.update_backup(new_folder)
+                    if content.shared_folder_id:
+                        r = client.sharing_list_folder_members(shared_folder_id=content.shared_folder_id)
+                        for member in r.users:
+                            new_folder.members.append(f'({member.access_type._tag[0].upper()}){member.user.email}')
+                        for group in r.groups:
+                            print(group)
+                            # new_folder.groups.append(f'({group.access_type._tag[0].upper()}){group.group.group_name}')
+                    new_folder, is_backup = self.get_path(client, folder=new_folder, max_level=max_level, current_level=current_level+1)
+                    if not is_backup:
+                        folder.add_folder(new_folder)
             if isinstance(content, FileMetadata):
-                revisions = self.dropbox.files_list_revisions(path=content.path_lower).entries
+                revisions = client.files_list_revisions(path=content.path_lower).entries
                 new_file = File(
                     content, last_modified=revisions[0].server_modified, created_at=revisions[-1].server_modified
                 )
