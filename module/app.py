@@ -8,7 +8,12 @@ from rich.live import Live
 from rich.table import Table
 from rich.console import Console
 from datetime import datetime
-import webbrowser, configparser, time, json, openpyxl, shutil, os, csv
+import webbrowser
+import configparser
+import time
+import json
+import os
+import csv
 
 console = Console()
 
@@ -104,14 +109,13 @@ class Folder:
         if self.parent:
             self.parent.add_file(file)
 
-    def add_folder(self, folder):
+    def add_folder(self, folder, direct_parent=True):
         self.total_folder += 1
-        if folder.total_folder:
-            self.sub_folder_recursive += 1
-        else:
+        if direct_parent:
             self.sub_folder_non_recursive += 1
+        self.sub_folder_recursive += 1
         if self.parent:
-            self.parent.add_folder(folder)
+            self.parent.add_folder(folder, direct_parent=False)
 
 
 class DropBoxApp:
@@ -211,10 +215,10 @@ class DropBoxApp:
                 print(f'Please check your authorization code ({auth_code})')
                 exit(1)
 
-            self.prepare_client(team_access)
-
             self.access_token = oauth_result.access_token
             self.refresh_token = oauth_result.refresh_token
+
+            self.prepare_client(team_access)
 
             if self.remember_access_token:
                 self.update_session()
@@ -223,7 +227,7 @@ class DropBoxApp:
         if not retry:
             console.print(
                 "[green]"
-                "Successfully set up client with account"
+                "Successfully set up client with account "
                 f"[bold italic]{current_account.email}[/bold italic]"
                 "[/green]"
             )
@@ -293,9 +297,10 @@ class DropBoxApp:
         self.output_file.close()
 
     def report(self, output_name):
+        self.output_name = output_name
+
         self.get_namespaces()
         self.check_backup()
-        self.output_name = output_name
         self.root.update_path('')
         # self.wb = openpyxl.load_workbook(f'output/{self.output_name}.xlsx')
         # self.ws = self.wb.active
@@ -373,7 +378,7 @@ class DropBoxApp:
             os.remove(f'output/{self.output_name}.csv')
         self.prepare_output_file()
         self.output_writer.writerow([
-            'Namespace', 'Path', 'Size',
+            'Namespace', 'Path', 'Size (byte)',
             'subFolder (Non-Recursive)', 'subFolder (Recursive)',
             'Created Date', 'Last Modified', 'Files', 'Members', 'Groups'
         ])
@@ -435,7 +440,7 @@ class DropBoxApp:
                 if content.shared_folder_id:
                     r = self.dropbox.sharing_list_folder_members(shared_folder_id=content.shared_folder_id)
                     for member in r.users:
-                        new_folder.members.append(member.user.email)
+                        new_folder.members.append(f'({member.access_type._tag[0].upper()}){member.user.email}')
                 new_folder, is_backup = self.get_path(path_root, new_folder)
                 if not is_backup:
                     folder.add_folder(new_folder)
