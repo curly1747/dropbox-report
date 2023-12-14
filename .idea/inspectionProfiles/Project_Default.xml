@@ -1,0 +1,51 @@
+<component name="InspectionProjectProfileManager">
+  <profile version="1.0">
+    <option name="myName" value="Project Default" />
+    <inspection_tool class="HtmlUnknownAttribute" enabled="true" level="WARNING" enabled_by_default="true">
+      <option name="myValues">
+        <value>
+          <list size="37">
+            <item index="0" class="java.lang.String" itemvalue="if-name" />
+            <item index="1" class="java.lang.String" itemvalue="id-type" />
+            <item index="2" class="java.lang.String" itemvalue="if" />
+            <item index="3" class="java.lang.String" itemvalue="if-type" />
+            <item index="4" class="java.lang.String" itemvalue="if-poster" />
+            <item index="5" class="java.lang.String" itemvalue="if-hd" />
+            <item index="6" class="java.lang.String" itemvalue="if-sessions" />
+            <item index="7" class="java.lang.String" itemvalue="if-duration" />
+            <item index="8" class="java.lang.String" itemvalue="if-year" />
+            <item index="9" class="java.lang.String" itemvalue="if-genres" />
+            <item index="10" class="java.lang.String" itemvalue="if-imdb" />
+            <item index="11" class="java.lang.String" itemvalue="if-rotten-tomatoes" />
+            <item index="12" class="java.lang.String" itemvalue="if-plot" />
+            <item index="13" class="java.lang.String" itemvalue="if-content-rating" />
+            <item index="14" class="java.lang.String" itemvalue="if-cc" />
+            <item index="15" class="java.lang.String" itemvalue="if-5.1" />
+            <item index="16" class="java.lang.String" itemvalue="if-cover" />
+            <item index="17" class="java.lang.String" itemvalue="if-logo-side" />
+            <item index="18" class="java.lang.String" itemvalue="if-logo" />
+            <item index="19" class="java.lang.String" itemvalue="if-size" />
+            <item index="20" class="java.lang.String" itemvalue="if-heading" />
+            <item index="21" class="java.lang.String" itemvalue="if-quest" />
+            <item index="22" class="java.lang.String" itemvalue="if-answer" />
+            <item index="23" class="java.lang.String" itemvalue="if-show-more" />
+            <item index="24" class="java.lang.String" itemvalue="if-render-button" />
+            <item index="25" class="java.lang.String" itemvalue="if-casts" />
+            <item index="26" class="java.lang.String" itemvalue="x-transition:enter-start" />
+            <item index="27" class="java.lang.String" itemvalue="x-transition:enter-end" />
+            <item index="28" class="java.lang.String" itemvalue="x-transition:enter" />
+            <item index="29" class="java.lang.String" itemvalue="@mouseleave" />
+            <item index="30" class="java.lang.String" itemvalue="@click.outside" />
+            <item index="31" class="java.lang.String" itemvalue="x-data" />
+            <item index="32" class="java.lang.String" itemvalue="x-show" />
+            <item index="33" class="java.lang.String" itemvalue="@click" />
+            <item index="34" class="java.lang.String" itemvalue="x-transition:leave" />
+            <item index="35" class="java.lang.String" itemvalue="x-transition:leave-start" />
+            <item index="36" class="java.lang.String" itemvalue="x-transition:leave-end" />
+          </list>
+        </value>
+      </option>
+      <option name="myCustomValuesEnabled" value="true" />
+    </inspection_tool>
+  </profile>
+</component>
