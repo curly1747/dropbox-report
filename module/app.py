@@ -476,7 +476,8 @@ class DropBoxApp:
                     for member in r.users:
                         new_folder.members.append(f'({member.access_type._tag[0].upper()}){member.user.email}')
                     for group in r.groups:
-                        new_folder.groups.append(f'({group.access_type._tag[0].upper()}){group.group.group_name}')
+                        print(group)
+                        # new_folder.groups.append(f'({group.access_type._tag[0].upper()}){group.group.group_name}')
                 new_folder, is_backup = self.get_path(path_root, new_folder)
                 if not is_backup:
                     folder.add_folder(new_folder)
