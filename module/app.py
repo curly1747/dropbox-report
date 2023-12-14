@@ -62,6 +62,7 @@ class Folder:
         self.parent = None
         self.files = list()
         self.members = list()
+        self.groups = list()
         self.total_file = 0
         self.total_folder = 0
         self.size = 0
@@ -244,6 +245,7 @@ class DropBoxApp:
         last_modified = f'{folder.last_modified:%m/%d/%Y}' if folder.last_modified else ""
         created_at = f'{folder.created_at:%m/%d/%Y}' if folder.created_at else ""
         self.result.append((
+            folder.namespace,
             folder.path_lower,
             self.sizeof_fmt(folder.size),
             f'{folder.sub_folder_recursive:,}',
@@ -252,6 +254,7 @@ class DropBoxApp:
             last_modified,
             f'{folder.total_file:,}',
             ','.join(folder.members),
+            ','.join(folder.groups),
             f'{folder.exec_time:.1f}'
         ))
 
@@ -263,6 +266,7 @@ class DropBoxApp:
             f'Running Time: {self.sec_to_hours(int(time.time() - self.root.tic))}',
         ]
         table = Table(title=' | '.join(title))
+        table.add_column("NameSpace")
         table.add_column("Folder Path")
         table.add_column("Size")
         table.add_column("SubFolder (Recursive)")
@@ -270,7 +274,8 @@ class DropBoxApp:
         table.add_column("Creation Date")
         table.add_column("Last Modified")
         table.add_column("Files")
-        table.add_column("Member")
+        table.add_column("Members")
+        table.add_column("Groups")
         table.add_column("Exec Time (s)")
         rows = list()
         for index, row in enumerate(reversed(self.result)):
@@ -280,9 +285,10 @@ class DropBoxApp:
                 table.add_row('...', '...', '...', '...', '...', '...', '...', '...')
                 break
         for row in reversed(rows):
-            path, size, sub_folder_r, sub_folder_non_r, created_at, last_modified, files, members, exec_time = row
-            table.add_row(path, size, sub_folder_r, sub_folder_non_r, created_at, last_modified, files, members,
-                          exec_time)
+            (namespace, path, size, sub_folder_r, sub_folder_non_r,
+             created_at, last_modified, files, members, groups, exec_time) = row
+            table.add_row(namespace, path, size, sub_folder_r, sub_folder_non_r,
+                          created_at, last_modified, files, members, groups, exec_time)
         return table
 
     def run(self, output_name, path=''):
@@ -331,7 +337,8 @@ class DropBoxApp:
             folder.created_at,
             folder.last_modified,
             folder.total_file,
-            ','.join(folder.members)
+            ','.join(folder.members),
+            ','.join(folder.groups)
         ])
         # self.ws.append(new_row)
         # self.wb.save(f'output/{self.output_name}.xlsx')
@@ -441,6 +448,8 @@ class DropBoxApp:
                     r = self.dropbox.sharing_list_folder_members(shared_folder_id=content.shared_folder_id)
                     for member in r.users:
                         new_folder.members.append(f'({member.access_type._tag[0].upper()}){member.user.email}')
+                    for group in r.groups:
+                        new_folder.groups.append(f'({group.access_type._tag[0].upper()}){group.group.group_name}')
                 new_folder, is_backup = self.get_path(path_root, new_folder)
                 if not is_backup:
                     folder.add_folder(new_folder)
