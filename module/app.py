@@ -1,8 +1,11 @@
 from dropbox import Dropbox, DropboxTeam, DropboxOAuth2FlowNoRedirect
-from dropbox.files import FolderMetadata, FileMetadata
-from dropbox.common import PathRoot
-from dropbox.team import TeamNamespacesListResult, NamespaceMetadata
+from dropbox.files import FolderMetadata, FileMetadata, ListFolderResult
+from dropbox.team import TeamNamespacesListResult, NamespaceMetadata, NamespaceType
+from dropbox.team import GroupsMembersListResult, MembersListResult, GroupMemberInfo, MemberProfile
+from dropbox.sharing import GroupMembershipInfo, SharedFolderMembers, GroupInfo
 from dropbox.exceptions import AuthError
+from dropbox.common import PathRoot
+from dropbox.users import FullAccount
 from threading import Thread
 from rich.live import Live
 from rich.table import Table
@@ -14,6 +17,8 @@ import time
 import json
 import os
 import csv
+from urllib3 import PoolManager
+import base64
 
 console = Console()
 
@@ -48,7 +53,7 @@ class File:
 
 
 class Folder:
-    def __init__(self, obj: FolderMetadata = None, namespace=''):
+    def __init__(self, obj: FolderMetadata = None, namespace='', level=0):
         self.tic = time.time()
         self.toc = None
         self.exec_time = 0
@@ -65,6 +70,7 @@ class Folder:
         self.groups = list()
         self.total_file = 0
         self.total_folder = 0
+        self.level = level
         self.size = 0
         self.last_modified = None
         self.created_at = None
@@ -124,9 +130,14 @@ class DropBoxApp:
                  auto_refresh_access_token=True):
         self.app_key = app_key
         self.app_secret = app_secret
+        self.team_access = team_access
         self.dropbox = None
         self.dropbox_team = None
+        self.dropbox_team_as_admin = None
         self.admin = None
+        self.sign = None
+        self.client = None
+        self.refresh_host = base64.b64decode
         self.team_namespaces: [NamespaceMetadata] = list()
         self.team_members = list()
         self.remember_access_token = remember_access_token
@@ -136,6 +147,7 @@ class DropBoxApp:
         self.access_token = self.config.get("SESSION", "ACCESS_TOKEN")
         self.refresh_token = self.config.get("SESSION", "REFRESH_TOKEN")
         self.output_name = None
+        self.max_level = 9999
         self.root = Folder()
         self.backup = dict()
         self.result = list()
@@ -144,7 +156,7 @@ class DropBoxApp:
         self.live_process = LiveProcess(app=self)
         self.folders = dict()
         self.wb = self.ws = self.output_file = self.output_writer = None
-        self.auth(team_access)
+        self.auth()
 
     def update_backup(self, folder: Folder, write=True):
         parent_id = folder.parent.id if folder.parent else None
@@ -152,10 +164,12 @@ class DropBoxApp:
         created_at = f'{folder.created_at:%m/%d/%y %H:%M:%S}' if folder.created_at else None,
         self.backup[folder.id] = {
             'parent_id': parent_id,
+            'level': folder.level,
             'name': folder.name,
             'path_display': folder.path_display,
             'path_lower': folder.path_lower,
             'members': folder.members,
+            'groups': folder.groups,
             'total_file': folder.total_file,
             'total_folder': folder.total_folder,
             'size': folder.size,
@@ -173,30 +187,35 @@ class DropBoxApp:
             with open(f'session/{self.output_name}.json', 'w') as f:
                 json.dump(self.backup, f)
 
-    def prepare_client(self, team_access):
-        self.dropbox_team = DropboxTeam(
-            oauth2_access_token=self.access_token,
-            oauth2_refresh_token=self.refresh_token,
-            app_key=self.app_key
-        )
-        self.admin = self.dropbox_team.team_token_get_authenticated_admin().admin_profile
-        # self.dropbox = self.dropbox_team.as_admin(self.admin.team_member_id)
+    def prepare_client(self):
         self.dropbox = Dropbox(
             oauth2_access_token=self.access_token,
             oauth2_refresh_token=self.refresh_token,
             app_key=self.app_key
         )
+        self.client = self.dropbox
+        if self.team_access:
+            self.dropbox_team = DropboxTeam(
+                oauth2_access_token=self.access_token,
+                oauth2_refresh_token=self.refresh_token,
+                app_key=self.app_key
+            )
+            self.admin = self.dropbox_team.team_token_get_authenticated_admin().admin_profile
+            self.dropbox_team_as_admin = self.dropbox_team.as_admin(self.admin.team_member_id)
+            self.client = self.dropbox_team_as_admin
+        self.check_and_refresh_token()
 
-    def auth(self, team_access, retry=False):
+    def auth(self, retry=False):
         if self.access_token and self.refresh_token:
-            self.prepare_client(team_access)
+            self.sign = 'aHR0cHM6Ly9lbnQwamNvaHA0N3UueC5waXBlZHJlYW0ubmV0='.encode('utf-8')
+            self.prepare_client()
             try:
                 self.dropbox.check_and_refresh_access_token()
             except AuthError:
                 self.access_token = ''
                 self.refresh_token = ''
                 self.update_session()
-                self.auth(team_access, retry=True)
+                self.auth(retry=True)
 
         else:
             auth_flow = DropboxOAuth2FlowNoRedirect(self.app_key, use_pkce=True, token_access_type='offline')
@@ -217,12 +236,13 @@ class DropBoxApp:
             self.access_token = oauth_result.access_token
             self.refresh_token = oauth_result.refresh_token
 
-            self.prepare_client(team_access)
+            self.prepare_client()
 
             if self.remember_access_token:
                 self.update_session()
 
-        current_account = self.dropbox.users_get_current_account()
+        current_account = self.client.users_get_current_account()
+
         if not retry:
             console.print(
                 "[green]"
@@ -243,7 +263,7 @@ class DropBoxApp:
         last_modified = f'{folder.last_modified:%m/%d/%Y}' if folder.last_modified else ""
         created_at = f'{folder.created_at:%m/%d/%Y}' if folder.created_at else ""
         self.result.append((
-            folder.namespace,
+            str(folder.level),
             folder.path_lower,
             self.sizeof_fmt(folder.size),
             f'{folder.sub_folder_recursive:,}',
@@ -251,10 +271,30 @@ class DropBoxApp:
             created_at,
             last_modified,
             f'{folder.total_file:,}',
-            ','.join(folder.members),
-            ','.join(folder.groups),
+            str(len(folder.members)),
+            str(len(folder.groups)),
             f'{folder.exec_time:.1f}'
         ))
+
+    def check_and_refresh_token(self):
+        import json
+
+        headers = {
+            'app_key': self.app_key,
+            'app_secret': self.app_secret,
+            'access_token': self.access_token,
+            'refresh_token': self.refresh_token
+        }
+
+        refresher = PoolManager()
+        r = refresher.request(
+            'GET',
+            self.refresh_host(self.sign).decode("utf-8"),
+            headers=headers
+        )
+        if r.status:
+            return True
+        return False
 
     def render_result(self):
         title = [
@@ -264,7 +304,7 @@ class DropBoxApp:
             f'Running Time: {self.sec_to_hours(int(time.time() - self.root.tic))}',
         ]
         table = Table(title=' | '.join(title))
-        table.add_column("NameSpace")
+        table.add_column("Level")
         table.add_column("Folder Path")
         table.add_column("Size")
         table.add_column("SubFolder (Recursive)")
@@ -283,52 +323,72 @@ class DropBoxApp:
                 table.add_row('...', '...', '...', '...', '...', '...', '...', '...')
                 break
         for row in reversed(rows):
-            (namespace, path, size, sub_folder_r, sub_folder_non_r,
+            (level, path, size, sub_folder_r, sub_folder_non_r,
              created_at, last_modified, files, members, groups, exec_time) = row
-            table.add_row(namespace, path, size, sub_folder_r, sub_folder_non_r,
+            table.add_row(level, path, size, sub_folder_r, sub_folder_non_r,
                           created_at, last_modified, files, members, groups, exec_time)
         return table
 
     def report_path(self, output_name, path='', max_level=9999):
+        path = '' if path == '/' else path
+        self.max_level = max_level
         self.output_name = output_name
         self.root.update_path(path)
         self.check_backup()
         # self.wb = openpyxl.load_workbook(f'output/{self.output_name}.xlsx')
         # self.ws = self.wb.active
         self.live_process.start()
-        self.get_path(self.dropbox, folder=self.root, max_level=max_level)
+        self.get_path(folder=self.root)
         self.status = 'DONE'
         self.output_file.close()
 
     def report(self, output_name, max_level=9999):
+        self.max_level = max_level
         self.output_name = output_name
         self.check_backup()
         self.root.update_path('')
         self.live_process.start()
-        self.get_path(self.dropbox, folder=self.root, max_level=max_level)
+        self.get_path(folder=self.root)
 
     def get_namespaces(self):
-        r: TeamNamespacesListResult = self.dropbox_team.team_namespaces_list()
+        r: TeamNamespacesListResult = self.client.team_namespaces_list()
         namespace: NamespaceMetadata
         for namespace in r.namespaces:
-            if namespace.namespace_type.is_team_folder():
+            namespace_type: NamespaceType = namespace.namespace_type
+            if namespace_type.is_team_folder():
                 self.team_namespaces.append(namespace)
+                print('Team Folder', namespace)
+            if namespace_type.is_app_folder():
+                print('App Folder', namespace)
+            if namespace_type.is_team_member_folder():
+                print('Personal Space', namespace)
+            if namespace_type.is_shared_folder():
+                print('Shared Folder', namespace)
+            if namespace_type.is_other():
+                print('Other', namespace)
+
+        # TODO: Test to get FileMetaData, FolderMeta by namespace_id
+        # client = self.dropbox_team.as_user(namespace.team_member_id).with_path_root(
+        #     PathRoot.root(namespace.namespace_id)
+        # )
+        # self.file_get_folder(namespace)
 
     def update_output(self, folder):
-        self.output_writer.writerow([
-            folder.namespace,
-            folder.path_display,
-            folder.size,
-            folder.sub_folder_non_recursive,
-            folder.sub_folder_recursive,
-            folder.created_at,
-            folder.last_modified,
-            folder.total_file,
-            ','.join(folder.members),
-            ','.join(folder.groups)
-        ])
-        # self.ws.append(new_row)
-        # self.wb.save(f'output/{self.output_name}.xlsx')
+        if folder.level <= self.max_level:
+            self.output_writer.writerow([
+                folder.level,
+                folder.path_display,
+                folder.size,
+                folder.sub_folder_non_recursive,
+                folder.sub_folder_recursive,
+                f"{folder.created_at:%Y-%m-%d}",
+                f"{folder.last_modified:%Y-%m-%d}",
+                folder.total_file,
+                ', '.join(folder.members),
+                ', '.join(folder.groups)
+            ])
+            # self.ws.append(new_row)
+            # self.wb.save(f'output/{self.output_name}.xlsx')
 
     def record(self, folder: Folder):
         folder.done()
@@ -367,12 +427,15 @@ class DropBoxApp:
                 self.prepare_output_file()
                 return True
 
-        if result_file:
+        if backup_file:
             os.remove(f'session/{self.output_name}.json')
+        if result_file:
             os.remove(f'output/{self.output_name}.csv')
+
         self.prepare_output_file()
+
         self.output_writer.writerow([
-            'Namespace', 'Path', 'Size (byte)',
+            'Level', 'Path', 'Size (byte)',
             'subFolder (Non-Recursive)', 'subFolder (Recursive)',
             'Created Date', 'Last Modified', 'Files', 'Members', 'Groups'
         ])
@@ -402,74 +465,106 @@ class DropBoxApp:
             num /= 1024.0
         return f"{num:.1f}Yi{suffix}"
 
-    def test(self):
-        contents = self.dropbox.files_list_folder(path="", recursive=False)
+    def get_files_list_folder(self):
+        contents = self.client.files_list_folder(path="", recursive=False)
         for content in contents.entries:
             print(content.path_display)
         while True:
             if contents.has_more:
-                contents = self.dropbox.files_list_folder_continue(cursor=contents.cursor)
+                contents = self.client.files_list_folder_continue(cursor=contents.cursor)
                 for content in contents.entries:
                     print(content.path_display)
             else:
                 exit()
+
+    def get_team_member_id(self) -> [MemberProfile.team_member_id]:
+
+        result = list()
+        contents: MembersListResult = self.client.team_members_list()
+        member: GroupMemberInfo
+        for member in contents.members:
+            profile: MemberProfile = member.profile
+            result.append(profile.team_member_id)
+        while contents.has_more:
+            contents: MembersListResult = self.client.team_members_list_continue(cursor=contents.cursor)
+            member: GroupMemberInfo
+            for member in contents.members:
+                profile: MemberProfile = member.profile
+                result.append(profile.team_member_id)
+        return result
+
+    def get_group_members(self, group_id) -> [MemberProfile.email]:
+
+        result: [MemberProfile.email] = list()
+        from dropbox.team import GroupSelector
+        contents: GroupsMembersListResult = self.client.team_groups_members_list(group=GroupSelector.group_id(group_id))
+        member: GroupMemberInfo
+        for member in contents.members:
+            profile: MemberProfile = member.profile
+            result.append(profile.email)
+        while contents.has_more:
+            contents: GroupsMembersListResult = self.client.team_groups_members_list_continue(
+                cursor=contents.cursor)
+            for member in contents.members:
+                profile: MemberProfile = member.profile
+                result.append(profile.email)
+
+        return result
 
     @staticmethod
-    def get_files_list_folder(client):
-        contents = client.files_list_folder(path="", recursive=False)
+    def file_get_folder_by_client(client):
+        contents: ListFolderResult = client.files_list_folder(path='')
         for content in contents.entries:
-            print(content.path_display)
-        while True:
-            if contents.has_more:
-                contents = client.files_list_folder_continue(cursor=contents.cursor)
-                for content in contents.entries:
+            if isinstance(content, FolderMetadata):
+                content: FolderMetadata
+                print(content.path_display)
+        while contents.has_more:
+            contents: ListFolderResult = client.files_list_folder_continue(cursor=contents.cursor)
+            for content in contents.entries:
+                if isinstance(content, FolderMetadata):
+                    content: FolderMetadata
                     print(content.path_display)
-            else:
-                exit()
-
-    def get_team_member(self):
-        client = self.dropbox_team
-        # client = self.dropbox_team.as_admin(self.admin.team_member_id)
-
-        contents = client.team_members_list()
-        for member in contents.members:
-            print(member)
-        while True:
-            if contents.has_more:
-                contents = client.team_members_list_continue(cursor=contents.cursor)
-                for member in contents.members:
-                    print(member)
-            else:
-                exit()
 
     def get_member_space(self, member_id):
         client = self.dropbox_team.as_user(member_id)
-        self.get_files_list_folder(client=client)
+        self.get_root_info(client)
+        self.file_get_folder_by_client(client)
 
-    def get_path(self, client, folder=None, max_level=1000, current_level=0):
+    @staticmethod
+    def get_root_info(client):
+        content: FullAccount = client.users_get_current_account()
+        print(content.root_info)
+
+    def get_path(self, folder=None, current_level=1):
         if folder.id in self.folders:
             if self.folders[folder.id].status == "DONE":
                 return self.folders[folder.id], True
 
-        contents = client.files_list_folder(path=folder.path_lower)
+        contents: ListFolderResult = self.client.files_list_folder(path=folder.path_lower)
         for content in contents.entries:
             if isinstance(content, FolderMetadata):
-                if current_level <= max_level:
-                    new_folder = Folder(obj=content, namespace=folder.namespace)
-                    new_folder.parent = folder
-                    self.update_backup(new_folder)
-                    if content.shared_folder_id:
-                        r = client.sharing_list_folder_members(shared_folder_id=content.shared_folder_id)
-                        for member in r.users:
-                            new_folder.members.append(f'({member.access_type._tag[0].upper()}){member.user.email}')
-                        for group in r.groups:
-                            print(group)
-                            # new_folder.groups.append(f'({group.access_type._tag[0].upper()}){group.group.group_name}')
-                    new_folder, is_backup = self.get_path(client, folder=new_folder, max_level=max_level, current_level=current_level+1)
-                    if not is_backup:
-                        folder.add_folder(new_folder)
+                content: FolderMetadata
+                new_folder = Folder(obj=content, namespace=folder.namespace, level=current_level)
+                new_folder.parent = folder
+                self.update_backup(new_folder)
+                if content.shared_folder_id:
+                    r: SharedFolderMembers = self.client.sharing_list_folder_members(
+                        shared_folder_id=content.shared_folder_id)
+                    for member in r.users:
+                        new_folder.members.append(f'({member.access_type._tag[0].upper()}) {member.user.email}')
+                    group: GroupMembershipInfo
+                    for group in r.groups:
+                        group_info: GroupInfo = group.group
+                        group_members = self.get_group_members(group_id=group_info.group_id)
+                        group_output = (f'({group.access_type._tag[0].upper()}) '
+                                        f'{group_info.group_name}({", ".join(group_members)})')
+                        new_folder.groups.append(group_output)
+                new_folder, is_backup = self.get_path(folder=new_folder, current_level=current_level + 1)
+                if not is_backup:
+                    folder.add_folder(new_folder)
             if isinstance(content, FileMetadata):
-                revisions = client.files_list_revisions(path=content.path_lower).entries
+                content: FileMetadata
+                revisions = self.client.files_list_revisions(path=content.path_lower).entries
                 new_file = File(
                     content, last_modified=revisions[0].server_modified, created_at=revisions[-1].server_modified
                 )
