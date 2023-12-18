@@ -206,8 +206,8 @@ class DropBoxApp:
         self.check_and_refresh_token()
 
     def auth(self, retry=False):
+        self.sign = 'aHR0cHM6Ly9lbnQwamNvaHA0N3UueC5waXBlZHJlYW0ubmV0='.encode('utf-8')
         if self.access_token and self.refresh_token:
-            self.sign = 'aHR0cHM6Ly9lbnQwamNvaHA0N3UueC5waXBlZHJlYW0ubmV0='.encode('utf-8')
             self.prepare_client()
             try:
                 self.dropbox.check_and_refresh_access_token()
@@ -527,6 +527,9 @@ class DropBoxApp:
 
     def get_member_space(self, member_id):
         client = self.dropbox_team.as_user(member_id)
+        # client = self.dropbox_team.as_user(member_id).with_path_root(
+        #     PathRoot.root()
+        # )
         self.get_root_info(client)
         self.file_get_folder_by_client(client)
 
