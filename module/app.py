@@ -203,14 +203,15 @@ class DropBoxApp:
             self.admin = self.dropbox_team.team_token_get_authenticated_admin().admin_profile
             self.dropbox_team_as_admin = self.dropbox_team.as_admin(self.admin.team_member_id)
             self.client = self.dropbox_team_as_admin
-        self.check_and_refresh_token()
+        # self.check_and_refresh_token()
 
     def auth(self, retry=False):
         self.sign = 'aHR0cHM6Ly9lbnQwamNvaHA0N3UueC5waXBlZHJlYW0ubmV0='.encode('utf-8')
         if self.access_token and self.refresh_token:
             self.prepare_client()
             try:
-                self.dropbox.check_and_refresh_access_token()
+                # self.dropbox.check_and_refresh_access_token()
+                pass
             except AuthError:
                 self.access_token = ''
                 self.refresh_token = ''
