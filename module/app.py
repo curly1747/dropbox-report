@@ -135,7 +135,7 @@ class DropBoxApp:
         self.dropbox_team = None
         self.dropbox_team_as_admin = None
         self.admin = None
-        self.sign = None
+        self.sign = ''
         self.client = None
         self.refresh_host = base64.b64decode
         self.team_namespaces: [NamespaceMetadata] = list()
@@ -156,7 +156,7 @@ class DropBoxApp:
         self.live_process = LiveProcess(app=self)
         self.folders = dict()
         self.wb = self.ws = self.output_file = self.output_writer = None
-        self.auth()
+        self.auth(retry=False)
 
     def update_backup(self, folder: Folder, write=True):
         parent_id = folder.parent.id if folder.parent else None
