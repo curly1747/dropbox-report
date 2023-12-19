@@ -3,7 +3,7 @@ from dropbox.files import FolderMetadata, FileMetadata, ListFolderResult, Delete
 from dropbox.team import TeamNamespacesListResult, NamespaceMetadata, NamespaceType
 from dropbox.team import GroupsMembersListResult, MembersListResult, GroupMemberInfo, MemberProfile
 from dropbox.team import TeamFolderListResult, TeamFolderMetadata, TeamFolderStatus
-from dropbox.sharing import GroupMembershipInfo, SharedFolderMembers, GroupInfo
+from dropbox.sharing import GroupMembershipInfo, SharedFolderMembers, GroupInfo, UserMembershipInfo, UserInfo, AccessLevel
 from dropbox.exceptions import AuthError
 from dropbox.users import FullAccount
 from threading import Thread
@@ -177,6 +177,7 @@ class DropBoxApp:
         created_at = f'{folder.created_at:%m/%d/%y %H:%M:%S}' if folder.created_at else None,
         self.backup[folder.id] = {
             'parent_id': parent_id,
+            'type': folder.type,
             'level': folder.level,
             'name': folder.name,
             'path_display': folder.path_display,
@@ -275,6 +276,7 @@ class DropBoxApp:
         last_modified = f'{folder.last_modified:%m/%d/%Y}' if folder.last_modified else ""
         created_at = f'{folder.created_at:%m/%d/%Y}' if folder.created_at else ""
         self.result.append((
+            folder.type,
             str(folder.level),
             folder.path_lower,
             self.sizeof_fmt(folder.size),
@@ -296,6 +298,7 @@ class DropBoxApp:
             f'Running Time: {self.sec_to_hours(int(time.time() - self.root.tic))}',
         ]
         table = Table(title=' | '.join(title))
+        table.add_column("Type")
         table.add_column("Level")
         table.add_column("Folder Path")
         table.add_column("Size")
@@ -315,9 +318,9 @@ class DropBoxApp:
                 table.add_row('...', '...', '...', '...', '...', '...', '...', '...')
                 break
         for row in reversed(rows):
-            (level, path, size, sub_folder_r, sub_folder_non_r,
+            (type_, level, path, size, sub_folder_r, sub_folder_non_r,
              created_at, last_modified, files, members, groups, exec_time) = row
-            table.add_row(level, path, size, sub_folder_r, sub_folder_non_r,
+            table.add_row(type_, level, path, size, sub_folder_r, sub_folder_non_r,
                           created_at, last_modified, files, members, groups, exec_time)
         return table
 
@@ -328,6 +331,8 @@ class DropBoxApp:
         self.root.update(path)
         self.check_backup()
         self.live_process.start()
+        # account = self.dropbox.users_get_current_account()
+        # self.get_path(folder=self.root, verify_id=account.account_id)
         self.get_path(folder=self.root)
         self.status = 'DONE'
         self.output_file.close()
@@ -388,7 +393,8 @@ class DropBoxApp:
             # Issue: Dropbox currently only return name and path in DeletedMetadata of deleted files and folders.
             team_member_root.update(path='', id_=f'tm:{team_member.team_member_id}', parent=self.root, type_=type_)
             client = self.dropbox_team.as_user(team_member.team_member_id)
-            self.get_path(folder=team_member_root, client=client)
+            # TODO: Check if only report content that owned by this user (avoid duplicate)
+            self.get_path(folder=team_member_root, client=client, verify_id=team_member.account_id)
             # TODO: Below line is handle to run test in small-scale (1 time per team member's personal space)
             break
 
@@ -437,6 +443,7 @@ class DropBoxApp:
     def update_output(self, folder):
         if folder.level <= self.max_level:
             self.output_writer.writerow([
+                folder.type,
                 folder.level,
                 folder.path_display,
                 folder.size,
@@ -448,8 +455,6 @@ class DropBoxApp:
                 ', '.join(folder.members),
                 ', '.join(folder.groups)
             ])
-            # self.ws.append(new_row)
-            # self.wb.save(f'output/{self.output_name}.xlsx')
 
     def record(self, folder: Folder):
         folder.done()
@@ -594,7 +599,7 @@ class DropBoxApp:
         content: FullAccount = client.users_get_current_account()
         print(content.root_info)
 
-    def get_path(self, folder=None, current_level=1, client=None, cursor=None):
+    def get_path(self, folder=None, current_level=1, client=None, cursor=None, verify_id=None):
         if folder.id in self.folders:
             if self.folders[folder.id].status == "DONE":
                 return self.folders[folder.id], True
@@ -615,25 +620,47 @@ class DropBoxApp:
                     new_folder = Folder(obj=content, namespace=folder.namespace, level=current_level, type_=folder.type)
                     new_folder.parent = folder
                     self.update_backup(new_folder)
-                    if content.shared_folder_id:
+
+                    # If have id need to verify, is_owner will be set to False by default
+                    is_owner = False if verify_id else True
+
+                    # In case folder didn't sharing info, this folder is owned by this user
+                    if not content.shared_folder_id:
+                        is_owner = True
+                    else:
                         # But if the parent is Member's Personal Space, may child folder is shared folder, verify it now!
                         # TODO: Check if Shared Folder only apply for Top-Level Folder of Private Content
                         if current_level == 1 and folder.type == 'Private Folder':
                             new_folder.type = "Shared Folder"
                         r: SharedFolderMembers = client.sharing_list_folder_members(
                             shared_folder_id=content.shared_folder_id)
-                        for member in r.users:
-                            new_folder.members.append(f'({member.access_type._tag[0].upper()}) {member.user.email}')
-                        group: GroupMembershipInfo
-                        for group in r.groups:
-                            group_info: GroupInfo = group.group
-                            group_members = self.get_group_members(group_id=group_info.group_id)
-                            group_output = (f'({group.access_type._tag[0].upper()}) '
-                                            f'{group_info.group_name}({", ".join(group_members)})')
-                            new_folder.groups.append(group_output)
-                    new_folder, is_backup = self.get_path(folder=new_folder, current_level=current_level + 1)
-                    if not is_backup:
-                        folder.add_folder(new_folder)
+
+                        # Verify if this user is the folder's owner
+                        if verify_id:
+                            member: UserMembershipInfo
+                            for member in r.users:
+                                member_info: UserInfo = member.user
+                                member_access: AccessLevel = member.access_type
+                                if member_info.account_id == verify_id and member_access.is_owner():
+                                    is_owner = True
+                                    break
+
+                        if is_owner:
+                            for member in r.users:
+                                new_folder.members.append(f'({member.access_type._tag[0].upper()}) {member.user.email}')
+                            group: GroupMembershipInfo
+                            for group in r.groups:
+                                group_info: GroupInfo = group.group
+                                group_members = self.get_group_members(group_id=group_info.group_id)
+                                group_output = (f'({group.access_type._tag[0].upper()}) '
+                                                f'{group_info.group_name}({", ".join(group_members)})')
+                                new_folder.groups.append(group_output)
+
+                    # Only get report if this user is the folder's owner
+                    if is_owner:
+                        new_folder, is_backup = self.get_path(folder=new_folder, current_level=current_level + 1)
+                        if not is_backup:
+                            folder.add_folder(new_folder)
             if isinstance(content, FileMetadata):
                 content: FileMetadata
                 revisions = client.files_list_revisions(path=content.path_lower).entries
