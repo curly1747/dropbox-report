@@ -25,7 +25,7 @@ if __name__ == "__main__":
         config.read("config.ini")
 
         app = DropBoxApp(
-            team_access=True,
+            team_access=False,
             app_key=config.get('DROPBOX', 'app_key'),
             app_secret=config.get('DROPBOX', 'app_secret')
         )
@@ -35,11 +35,13 @@ if __name__ == "__main__":
         # TODO: Check Creation, Last Modify
         app.report_path(output_name=args.output_name, path=args.path, max_level=args.max_level)
 
+        app.report(output_name=args.output_name, max_level=args.max_leve)
+
         # TODO: Test namespace to classify folder type
         # app.get_namespaces()
 
         # TODO: Test get team's member
-        # members = app.get_team_member_id()
+        # members = app.get_team_member()
 
         # TODO: Test get member's personal space
         # app.get_member_space(member_id=members[0])

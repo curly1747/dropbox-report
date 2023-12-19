@@ -1,10 +1,10 @@
 from dropbox import Dropbox, DropboxTeam, DropboxOAuth2FlowNoRedirect
-from dropbox.files import FolderMetadata, FileMetadata, ListFolderResult
+from dropbox.files import FolderMetadata, FileMetadata, ListFolderResult, DeletedMetadata
 from dropbox.team import TeamNamespacesListResult, NamespaceMetadata, NamespaceType
 from dropbox.team import GroupsMembersListResult, MembersListResult, GroupMemberInfo, MemberProfile
+from dropbox.team import TeamFolderListResult, TeamFolderMetadata, TeamFolderStatus
 from dropbox.sharing import GroupMembershipInfo, SharedFolderMembers, GroupInfo
 from dropbox.exceptions import AuthError
-from dropbox.common import PathRoot
 from dropbox.users import FullAccount
 from threading import Thread
 from rich.live import Live
@@ -17,8 +17,7 @@ import time
 import json
 import os
 import csv
-from urllib3 import PoolManager
-import base64
+from typing import Optional
 
 console = Console()
 
@@ -53,7 +52,7 @@ class File:
 
 
 class Folder:
-    def __init__(self, obj: FolderMetadata = None, namespace='', level=0):
+    def __init__(self, obj: FolderMetadata = None, namespace='', level=0, type_=''):
         self.tic = time.time()
         self.toc = None
         self.exec_time = 0
@@ -65,6 +64,7 @@ class Folder:
         self.namespace = namespace
         self.parent_id = None
         self.parent = None
+        self.type = type_
         self.files = list()
         self.members = list()
         self.groups = list()
@@ -96,10 +96,17 @@ class Folder:
         self.tic = backup['tic']
         self.toc = backup['toc']
 
-    def update_path(self, path):
+    def update(self, path, id_=None, parent=None, type_=None):
         self.name = path.split("/")[-1]
         self.path_display = path if path else '/'
         self.path_lower = path
+        if id_:
+            self.id = id_
+        if parent:
+            self.parent_id = parent.id
+            self.parent = parent
+        if type_:
+            self.type = type_
 
     def done(self):
         self.status = "DONE"
@@ -135,11 +142,17 @@ class DropBoxApp:
         self.dropbox_team = None
         self.dropbox_team_as_admin = None
         self.admin = None
-        self.sign = ''
         self.client = None
-        self.refresh_host = base64.b64decode
-        self.team_namespaces: [NamespaceMetadata] = list()
-        self.team_members = list()
+        self.type_mapping = {
+            'team_folder': 'Team Folder',
+            'app_folder': 'App Sandbox Folder',
+            'other': 'Other Folder',
+            'team_member_folder': 'Private Folder',
+            'shared_folder': 'Shared Folder'
+        }
+        self.team_namespaces: list[NamespaceMetadata] = list()
+        self.team_members: list[MemberProfile] = list()
+        self.team_folders: list[TeamFolderMetadata] = list()
         self.remember_access_token = remember_access_token
         self.auto_refresh_access_token = auto_refresh_access_token
         self.config = configparser.ConfigParser()
@@ -156,7 +169,7 @@ class DropBoxApp:
         self.live_process = LiveProcess(app=self)
         self.folders = dict()
         self.wb = self.ws = self.output_file = self.output_writer = None
-        self.auth(retry=False)
+        self.auth()
 
     def update_backup(self, folder: Folder, write=True):
         parent_id = folder.parent.id if folder.parent else None
@@ -203,15 +216,13 @@ class DropBoxApp:
             self.admin = self.dropbox_team.team_token_get_authenticated_admin().admin_profile
             self.dropbox_team_as_admin = self.dropbox_team.as_admin(self.admin.team_member_id)
             self.client = self.dropbox_team_as_admin
-        # self.check_and_refresh_token()
 
     def auth(self, retry=False):
-        self.sign = 'aHR0cHM6Ly9lbnQwamNvaHA0N3UueC5waXBlZHJlYW0ubmV0='.encode('utf-8')
+
         if self.access_token and self.refresh_token:
             self.prepare_client()
             try:
-                # self.dropbox.check_and_refresh_access_token()
-                pass
+                self.dropbox.check_and_refresh_access_token()
             except AuthError:
                 self.access_token = ''
                 self.refresh_token = ''
@@ -277,26 +288,6 @@ class DropBoxApp:
             f'{folder.exec_time:.1f}'
         ))
 
-    def check_and_refresh_token(self):
-        import json
-
-        headers = {
-            'app_key': self.app_key,
-            'app_secret': self.app_secret,
-            'access_token': self.access_token,
-            'refresh_token': self.refresh_token
-        }
-
-        refresher = PoolManager()
-        r = refresher.request(
-            'GET',
-            self.refresh_host(self.sign).decode("utf-8"),
-            headers=headers
-        )
-        if r.status:
-            return True
-        return False
-
     def render_result(self):
         title = [
             f'Files: {self.root.total_file:,}',
@@ -334,45 +325,114 @@ class DropBoxApp:
         path = '' if path == '/' else path
         self.max_level = max_level
         self.output_name = output_name
-        self.root.update_path(path)
+        self.root.update(path)
         self.check_backup()
-        # self.wb = openpyxl.load_workbook(f'output/{self.output_name}.xlsx')
-        # self.ws = self.wb.active
         self.live_process.start()
         self.get_path(folder=self.root)
         self.status = 'DONE'
         self.output_file.close()
 
     def report(self, output_name, max_level=9999):
+        path = ''
         self.max_level = max_level
         self.output_name = output_name
+        self.root.update(path)
         self.check_backup()
-        self.root.update_path('')
         self.live_process.start()
-        self.get_path(folder=self.root)
 
-    def get_namespaces(self):
-        r: TeamNamespacesListResult = self.client.team_namespaces_list()
+        # 1. Get team folder meta data for mapping in namespace
+        self.team_folders = self.get_team_folders()
+
+        # 2. Get namespace from root and run report
+        # TODO: Check if other tag has team_member_id?
+        namespaces = self.get_namespaces(types=['team_folder', 'app_folder', 'other'])
+        team_folder_test_count = 0
+        archived_team_folder_test_count = 0
+        app_folder_test_count = 0
+        other_test_count = 0
+        for namespace in namespaces:
+            namespace_root = Folder(namespace=namespace.namespace_id)
+            # Classify folder type by namespace tag, If tag is team folder -> check status is active or archived
+            # TODO: Check verify tag
+            # TODO: Check mapping namespace's name and team folder's name (Apply only for team_folder type)
+            type_ = self.verify_namespace_tag(namespace)
+
+            # TODO: Below is condition verify to run test in small-scale (1 time per folder type)
+            if type_ == 'Team Folder':
+                team_folder_test_count += 1
+                if team_folder_test_count > 1:
+                    continue
+            if type_ == "Archived Team Folder":
+                archived_team_folder_test_count += 1
+                if archived_team_folder_test_count > 1:
+                    continue
+            if type_ == "App Sandbox Folder":
+                app_folder_test_count += 1
+                if app_folder_test_count > 1:
+                    continue
+            if type_ == "Other Folder":
+                other_test_count += 1
+                if other_test_count > 1:
+                    continue
+
+            namespace_root.update(path='', id_=f'ns:{namespace.namespace_id}', parent=self.root, type_=type_)
+            client = self.dropbox_team.as_user(namespace.team_member_id)
+            # TODO: Check namespace's root is report under root
+            self.get_path(folder=namespace_root, client=client)
+
+        # 3. Get Team Member's Personal Space (Private Folder)
+        self.team_members = self.get_team_member()
+        for team_member in self.team_members:
+            team_member_root = Folder()
+            type_ = "Private Folder"
+            # Issue: Dropbox currently only return name and path in DeletedMetadata of deleted files and folders.
+            team_member_root.update(path='', id_=f'tm:{team_member.team_member_id}', parent=self.root, type_=type_)
+            client = self.dropbox_team.as_user(team_member.team_member_id)
+            self.get_path(folder=team_member_root, client=client)
+            # TODO: Below line is handle to run test in small-scale (1 time per team member's personal space)
+            break
+
+        self.status = 'DONE'
+        self.output_file.close()
+
+    def verify_namespace_tag(self, namespace: NamespaceMetadata):
+        type_ = self.type_mapping[namespace.namespace_type._tag]
+        if type_ == 'Team Folder':
+            for team_folder in self.team_folders:
+                if team_folder.name == namespace.name:
+                    status: TeamFolderStatus = team_folder.status
+                    if status.is_archived() or status.is_archive_in_progress():
+                        type_ = "Archived Team Folder"
+                    break
+        return type_
+
+    def get_team_folders(self) -> list[TeamFolderMetadata]:
+        result = list()
+        r: TeamFolderListResult = self.dropbox_team.team_team_folder_list()
+        result.extend(r.team_folders)
+        while r.has_more:
+            r: TeamFolderListResult = self.dropbox_team.team_team_folder_list_continue(cursor=r.cursor)
+            result.extend(r.team_folders)
+        return result
+
+    def get_namespaces(self, types=None) -> list[NamespaceMetadata]:
+        result = list()
+        types = ['team_folder', 'app_folder', 'other'] if not types else types
+        r: TeamNamespacesListResult = self.dropbox_team.team_namespaces_list()
         namespace: NamespaceMetadata
         for namespace in r.namespaces:
             namespace_type: NamespaceType = namespace.namespace_type
-            if namespace_type.is_team_folder():
-                self.team_namespaces.append(namespace)
-                print('Team Folder', namespace)
-            if namespace_type.is_app_folder():
-                print('App Folder', namespace)
-            if namespace_type.is_team_member_folder():
-                print('Personal Space', namespace)
-            if namespace_type.is_shared_folder():
-                print('Shared Folder', namespace)
-            if namespace_type.is_other():
-                print('Other', namespace)
-
-        # TODO: Test to get FileMetaData, FolderMeta by namespace_id
-        # client = self.dropbox_team.as_user(namespace.team_member_id).with_path_root(
-        #     PathRoot.root(namespace.namespace_id)
-        # )
-        # self.file_get_folder(namespace)
+            if 'team_folder' in types and namespace_type.is_team_folder():
+                self.result.append(namespace)
+            elif 'shared_folder' in types and namespace_type.is_shared_folder():
+                self.result.append(namespace)
+            elif 'private_folder' in types and namespace_type.is_team_member_folder():
+                self.result.append(namespace)
+            elif 'app_folder' in types and namespace_type.is_app_folder():
+                self.result.append(namespace)
+            elif 'other' in types and namespace_type.is_other():
+                self.result.append(namespace)
+        return result
 
     def update_output(self, folder):
         if folder.level <= self.max_level:
@@ -478,10 +538,9 @@ class DropBoxApp:
             else:
                 exit()
 
-    def get_team_member_id(self) -> [MemberProfile.team_member_id]:
-
+    def get_team_member(self) -> list[MemberProfile]:
         result = list()
-        contents: MembersListResult = self.client.team_members_list()
+        contents: MembersListResult = self.dropbox_team.team_members_list()
         member: GroupMemberInfo
         for member in contents.members:
             profile: MemberProfile = member.profile
@@ -491,7 +550,7 @@ class DropBoxApp:
             member: GroupMemberInfo
             for member in contents.members:
                 profile: MemberProfile = member.profile
-                result.append(profile.team_member_id)
+                result.append(profile)
         return result
 
     def get_group_members(self, group_id) -> [MemberProfile.email]:
@@ -528,10 +587,6 @@ class DropBoxApp:
 
     def get_member_space(self, member_id):
         client = self.dropbox_team.as_user(member_id)
-        # client = self.dropbox_team.as_user(member_id).with_path_root(
-        #     PathRoot.root()
-        # )
-        self.get_root_info(client)
         self.file_get_folder_by_client(client)
 
     @staticmethod
@@ -539,39 +594,55 @@ class DropBoxApp:
         content: FullAccount = client.users_get_current_account()
         print(content.root_info)
 
-    def get_path(self, folder=None, current_level=1):
+    def get_path(self, folder=None, current_level=1, client=None, cursor=None):
         if folder.id in self.folders:
             if self.folders[folder.id].status == "DONE":
                 return self.folders[folder.id], True
 
-        contents: ListFolderResult = self.client.files_list_folder(path=folder.path_lower)
+        if not client:
+            client = self.client
+        if not cursor:
+            contents: ListFolderResult = client.files_list_folder(path=folder.path_lower)
+        else:
+            contents: ListFolderResult = client.files_list_folder_continue(cursor=cursor)
+
         for content in contents.entries:
             if isinstance(content, FolderMetadata):
-                content: FolderMetadata
-                new_folder = Folder(obj=content, namespace=folder.namespace, level=current_level)
-                new_folder.parent = folder
-                self.update_backup(new_folder)
-                if content.shared_folder_id:
-                    r: SharedFolderMembers = self.client.sharing_list_folder_members(
-                        shared_folder_id=content.shared_folder_id)
-                    for member in r.users:
-                        new_folder.members.append(f'({member.access_type._tag[0].upper()}) {member.user.email}')
-                    group: GroupMembershipInfo
-                    for group in r.groups:
-                        group_info: GroupInfo = group.group
-                        group_members = self.get_group_members(group_id=group_info.group_id)
-                        group_output = (f'({group.access_type._tag[0].upper()}) '
-                                        f'{group_info.group_name}({", ".join(group_members)})')
-                        new_folder.groups.append(group_output)
-                new_folder, is_backup = self.get_path(folder=new_folder, current_level=current_level + 1)
-                if not is_backup:
-                    folder.add_folder(new_folder)
+                # TODO: The line below is condition verify to run test in small-scale, remove to run in recursive mode
+                if current_level <= self.max_level:
+                    content: FolderMetadata
+                    # Child folder will be inherited folder type from the parent
+                    new_folder = Folder(obj=content, namespace=folder.namespace, level=current_level, type_=folder.type)
+                    new_folder.parent = folder
+                    self.update_backup(new_folder)
+                    if content.shared_folder_id:
+                        # But if the parent is Member's Personal Space, may child folder is shared folder, verify it now!
+                        # TODO: Check if Shared Folder only apply for Top-Level Folder of Private Content
+                        if current_level == 1 and folder.type == 'Private Folder':
+                            new_folder.type = "Shared Folder"
+                        r: SharedFolderMembers = client.sharing_list_folder_members(
+                            shared_folder_id=content.shared_folder_id)
+                        for member in r.users:
+                            new_folder.members.append(f'({member.access_type._tag[0].upper()}) {member.user.email}')
+                        group: GroupMembershipInfo
+                        for group in r.groups:
+                            group_info: GroupInfo = group.group
+                            group_members = self.get_group_members(group_id=group_info.group_id)
+                            group_output = (f'({group.access_type._tag[0].upper()}) '
+                                            f'{group_info.group_name}({", ".join(group_members)})')
+                            new_folder.groups.append(group_output)
+                    new_folder, is_backup = self.get_path(folder=new_folder, current_level=current_level + 1)
+                    if not is_backup:
+                        folder.add_folder(new_folder)
             if isinstance(content, FileMetadata):
                 content: FileMetadata
-                revisions = self.client.files_list_revisions(path=content.path_lower).entries
+                revisions = client.files_list_revisions(path=content.path_lower).entries
                 new_file = File(
                     content, last_modified=revisions[0].server_modified, created_at=revisions[-1].server_modified
                 )
                 folder.add_file(new_file)
-        self.record(folder)
+        if contents.has_more:
+            return self.get_path(folder=folder, current_level=current_level, client=client, cursor=contents.cursor)
+        else:
+            self.record(folder)
         return folder, False
