@@ -277,6 +277,7 @@ class DropBoxApp:
         created_at = f'{folder.created_at:%m/%d/%Y}' if folder.created_at else ""
         self.result.append((
             folder.type,
+            folder.namespace,
             str(folder.level),
             folder.path_lower,
             self.sizeof_fmt(folder.size),
@@ -299,6 +300,7 @@ class DropBoxApp:
         ]
         table = Table(title=' | '.join(title))
         table.add_column("Type")
+        table.add_column('Name Space')
         table.add_column("Level")
         table.add_column("Folder Path")
         table.add_column("Size")
@@ -318,9 +320,9 @@ class DropBoxApp:
                 table.add_row('...', '...', '...', '...', '...', '...', '...', '...')
                 break
         for row in reversed(rows):
-            (type_, level, path, size, sub_folder_r, sub_folder_non_r,
+            (type_, name_space, level, path, size, sub_folder_r, sub_folder_non_r,
              created_at, last_modified, files, members, groups, exec_time) = row
-            table.add_row(type_, level, path, size, sub_folder_r, sub_folder_non_r,
+            table.add_row(type_, name_space, level, path, size, sub_folder_r, sub_folder_non_r,
                           created_at, last_modified, files, members, groups, exec_time)
         return table
 
@@ -342,75 +344,58 @@ class DropBoxApp:
         self.max_level = max_level
         self.output_name = output_name
         self.root.update(path)
+        self.root.namespace = self.root.type = 'root'
         self.check_backup()
         self.live_process.start()
 
         # 1. Get team folder meta data for mapping in namespace
         self.team_folders = self.get_team_folders()
 
+        for team_folder in self.team_folders:
+            team_folder_root = Folder(level=1, namespace=team_folder.name)
+            status: TeamFolderStatus = team_folder.status
+            type_ = "Team Folder"
+            if status.is_archived() or status.is_archive_in_progress():
+                # TODO Check if can get content of archived team folder
+                continue
+                type_ = "Archived Team Folder"
+            team_folder_root.update(path=f'/{team_folder.name}', id_=f'ns:{team_folder.team_folder_id}', parent=self.root, type_=type_)
+            client = self.dropbox_team_as_admin
+            print(team_folder)
+            self.get_path(folder=team_folder_root, client=client, current_level=2)
+            break
+
         # 2. Get namespace from root and run report
-        # TODO: Check if other tag has team_member_id?
-        namespaces = self.get_namespaces(types=['team_folder', 'app_folder', 'other'])
-        team_folder_test_count = 0
-        archived_team_folder_test_count = 0
-        app_folder_test_count = 0
-        other_test_count = 0
+        namespaces = self.get_namespaces(types=['app_folder', 'other'])
         for namespace in namespaces:
-            namespace_root = Folder(namespace=namespace.namespace_id)
-            # Classify folder type by namespace tag, If tag is team folder -> check status is active or archived
-            # TODO: Check verify tag
-            # TODO: Check mapping namespace's name and team folder's name (Apply only for team_folder type)
+            namespace_root = Folder(namespace=namespace.name, level=1)
             type_ = self.verify_namespace_tag(namespace)
-
-            # TODO: Below is condition verify to run test in small-scale (1 time per folder type)
-            if type_ == 'Team Folder':
-                team_folder_test_count += 1
-                if team_folder_test_count > 1:
-                    continue
-            if type_ == "Archived Team Folder":
-                archived_team_folder_test_count += 1
-                if archived_team_folder_test_count > 1:
-                    continue
-            if type_ == "App Sandbox Folder":
-                app_folder_test_count += 1
-                if app_folder_test_count > 1:
-                    continue
-            if type_ == "Other Folder":
-                other_test_count += 1
-                if other_test_count > 1:
-                    continue
-
+            print(namespace)
             namespace_root.update(path='', id_=f'ns:{namespace.namespace_id}', parent=self.root, type_=type_)
             client = self.dropbox_team.as_user(namespace.team_member_id)
-            # TODO: Check namespace's root is report under root
-            self.get_path(folder=namespace_root, client=client)
+            account = client.users_get_current_account()
+            self.get_path(folder=namespace_root, client=client, verify_id=account.account_id, current_level=2)
+            break
 
         # 3. Get Team Member's Personal Space (Private Folder)
         self.team_members = self.get_team_member()
         for team_member in self.team_members:
-            team_member_root = Folder()
+            print(team_member)
+            team_member_root = Folder(namespace=team_member.name)
             type_ = "Private Folder"
             # Issue: Dropbox currently only return name and path in DeletedMetadata of deleted files and folders.
             team_member_root.update(path='', id_=f'tm:{team_member.team_member_id}', parent=self.root, type_=type_)
             client = self.dropbox_team.as_user(team_member.team_member_id)
             # TODO: Check if only report content that owned by this user (avoid duplicate)
-            self.get_path(folder=team_member_root, client=client, verify_id=team_member.account_id)
-            # TODO: Below line is handle to run test in small-scale (1 time per team member's personal space)
+            self.get_path(folder=team_member_root, client=client, verify_id=team_member.account_id, current_level=2)
             break
 
+        self.record(self.root)
         self.status = 'DONE'
         self.output_file.close()
 
     def verify_namespace_tag(self, namespace: NamespaceMetadata):
-        type_ = self.type_mapping[namespace.namespace_type._tag]
-        if type_ == 'Team Folder':
-            for team_folder in self.team_folders:
-                if team_folder.name == namespace.name:
-                    status: TeamFolderStatus = team_folder.status
-                    if status.is_archived() or status.is_archive_in_progress():
-                        type_ = "Archived Team Folder"
-                    break
-        return type_
+        return self.type_mapping[namespace.namespace_type._tag]
 
     def get_team_folders(self) -> list[TeamFolderMetadata]:
         result = list()
@@ -429,28 +414,31 @@ class DropBoxApp:
         for namespace in r.namespaces:
             namespace_type: NamespaceType = namespace.namespace_type
             if 'team_folder' in types and namespace_type.is_team_folder():
-                self.result.append(namespace)
+                result.append(namespace)
             elif 'shared_folder' in types and namespace_type.is_shared_folder():
-                self.result.append(namespace)
+                result.append(namespace)
             elif 'private_folder' in types and namespace_type.is_team_member_folder():
-                self.result.append(namespace)
+                result.append(namespace)
             elif 'app_folder' in types and namespace_type.is_app_folder():
-                self.result.append(namespace)
+                result.append(namespace)
             elif 'other' in types and namespace_type.is_other():
-                self.result.append(namespace)
+                result.append(namespace)
         return result
 
     def update_output(self, folder):
+        created_at = f"{folder.created_at:%Y-%m-%d}" if folder.created_at else ''
+        last_modified = f"{folder.last_modified:%Y-%m-%d}" if folder.last_modified else ''
         if folder.level <= self.max_level:
             self.output_writer.writerow([
                 folder.type,
+                folder.namespace,
                 folder.level,
                 folder.path_display,
                 folder.size,
                 folder.sub_folder_non_recursive,
                 folder.sub_folder_recursive,
-                f"{folder.created_at:%Y-%m-%d}",
-                f"{folder.last_modified:%Y-%m-%d}",
+                created_at,
+                last_modified,
                 folder.total_file,
                 ', '.join(folder.members),
                 ', '.join(folder.groups)
@@ -501,7 +489,7 @@ class DropBoxApp:
         self.prepare_output_file()
 
         self.output_writer.writerow([
-            'Level', 'Path', 'Size (byte)',
+            'Type', 'Name Space', 'Level', 'Path', 'Size (byte)',
             'subFolder (Non-Recursive)', 'subFolder (Recursive)',
             'Created Date', 'Last Modified', 'Files', 'Members', 'Groups'
         ])
@@ -549,7 +537,7 @@ class DropBoxApp:
         member: GroupMemberInfo
         for member in contents.members:
             profile: MemberProfile = member.profile
-            result.append(profile.team_member_id)
+            result.append(profile)
         while contents.has_more:
             contents: MembersListResult = self.client.team_members_list_continue(cursor=contents.cursor)
             member: GroupMemberInfo
@@ -562,13 +550,13 @@ class DropBoxApp:
 
         result: [MemberProfile.email] = list()
         from dropbox.team import GroupSelector
-        contents: GroupsMembersListResult = self.client.team_groups_members_list(group=GroupSelector.group_id(group_id))
+        contents: GroupsMembersListResult = self.dropbox_team.team_groups_members_list(group=GroupSelector.group_id(group_id))
         member: GroupMemberInfo
         for member in contents.members:
             profile: MemberProfile = member.profile
             result.append(profile.email)
         while contents.has_more:
-            contents: GroupsMembersListResult = self.client.team_groups_members_list_continue(
+            contents: GroupsMembersListResult = self.dropbox_team.team_groups_members_list_continue(
                 cursor=contents.cursor)
             for member in contents.members:
                 profile: MemberProfile = member.profile
@@ -607,12 +595,14 @@ class DropBoxApp:
         if not client:
             client = self.client
         if not cursor:
+            print("pl", folder.path_lower)
             contents: ListFolderResult = client.files_list_folder(path=folder.path_lower)
         else:
             contents: ListFolderResult = client.files_list_folder_continue(cursor=cursor)
 
         for content in contents.entries:
             if isinstance(content, FolderMetadata):
+                # print(content)
                 # TODO: The line below is condition verify to run test in small-scale, remove to run in recursive mode
                 if current_level <= self.max_level:
                     content: FolderMetadata
@@ -629,7 +619,6 @@ class DropBoxApp:
                         is_owner = True
                     else:
                         # But if the parent is Member's Personal Space, may child folder is shared folder, verify it now!
-                        # TODO: Check if Shared Folder only apply for Top-Level Folder of Private Content
                         if current_level == 1 and folder.type == 'Private Folder':
                             new_folder.type = "Shared Folder"
                         r: SharedFolderMembers = client.sharing_list_folder_members(
@@ -658,10 +647,11 @@ class DropBoxApp:
 
                     # Only get report if this user is the folder's owner
                     if is_owner:
-                        new_folder, is_backup = self.get_path(folder=new_folder, current_level=current_level + 1)
+                        new_folder, is_backup = self.get_path(folder=new_folder, current_level=current_level + 1, client=client, verify_id=verify_id)
                         if not is_backup:
                             folder.add_folder(new_folder)
             if isinstance(content, FileMetadata):
+                # print(content)
                 content: FileMetadata
                 revisions = client.files_list_revisions(path=content.path_lower).entries
                 new_file = File(
@@ -669,7 +659,7 @@ class DropBoxApp:
                 )
                 folder.add_file(new_file)
         if contents.has_more:
-            return self.get_path(folder=folder, current_level=current_level, client=client, cursor=contents.cursor)
+            return self.get_path(folder=folder, current_level=current_level, client=client, cursor=contents.cursor, verify_id=verify_id)
         else:
             self.record(folder)
         return folder, False

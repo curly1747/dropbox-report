@@ -9,9 +9,9 @@ parser = argparse.ArgumentParser()
 parser.add_argument("-n", "--output_name", type=str, default=f'report_{datetime.now():%Y-%m-%d %H-%M-%S}',
                     help=(f"The output will be generated with this config name in the '/output' folder. "
                           "If unset, default value is 'report_YYYY-MM-DD HH-MM-SS'"))
-parser.add_argument("-p", "--path", type=str, default='/',
-                    help=f"The path to get the report, must beginning with /. "
-                         "If unset, default value is '/', everything in the admin space will be captured.")
+# parser.add_argument("-p", "--path", type=str, default='/',
+#                     help=f"The path to get the report, must beginning with /. "
+#                          "If unset, default value is '/', everything in the admin space will be captured.")
 parser.add_argument("-l", "--max_level", type=int, default=1,
                     help=f"The sub-folder levels to be export to output file. "
                          f"If unset, all sub-levels will be export to output")
