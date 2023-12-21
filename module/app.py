@@ -843,6 +843,8 @@ class DropBoxApp:
         display.add_row(row)
         print("\n".join(display.get_string().splitlines()[-2:]))
 
+        self.output_file.close()
+
     def get_private_shared(self, display, folder=None, current_level=1, client=None, cursor=None, verify_id=None):
 
         self.dropbox.check_and_refresh_access_token()
