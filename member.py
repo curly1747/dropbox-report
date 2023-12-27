@@ -17,7 +17,10 @@ parser.add_argument("-l", "--max_level", type=int, default=999,
                     help=f"(Only supported for member-specified report) "
                          f"The sub-folder levels to be export to output file. "
                          f"If unset, all sub-levels will be export to output")
-
+parser.add_argument("-r", "--skip_not_root", type=int, default=0,
+                    help=f"Fetch all sub-folders, sub-files or just root?"
+                         f"If set to 1, just get content of root (folder level 0). "
+                         f"If unset or set to 0, get all sub-files and sub folders")
 
 args = parser.parse_args()
 
@@ -33,7 +36,8 @@ if __name__ == "__main__":
             app_secret=config.get('DROPBOX', 'app_secret')
         )
         if args.member:
-            app.member_report(output_name=args.output_name, member_indentify=args.member)
+            app.member_report(output_name=args.output_name, member_indentify=args.member, max_level=args.max_level,
+                              skip_not_root=args.skip_not_root)
         else:
             app.all_member_report(output_name=args.output_name)
 

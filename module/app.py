@@ -4,8 +4,9 @@ from dropbox.team import TeamNamespacesListResult, NamespaceMetadata, NamespaceT
 from dropbox.team import GroupsMembersListResult, MembersListResult, GroupMemberInfo, MemberProfile
 from dropbox.team import TeamFolderListResult, TeamFolderMetadata, TeamFolderStatus
 from dropbox.sharing import GroupMembershipInfo, SharedFolderMembers, GroupInfo, UserMembershipInfo, UserInfo, \
-    AccessLevel
+    AccessLevel, SharedFileMembers, SharedLinkMetadata, FileLinkMetadata, FolderLinkMetadata
 from dropbox.exceptions import AuthError
+from zipfile import ZipFile
 from dropbox.users import FullAccount
 from threading import Thread
 from rich.live import Live
@@ -18,8 +19,12 @@ import time
 import json
 import os
 import csv
-from typing import Optional
+import re
 from prettytable import PrettyTable
+from openpyxl import load_workbook
+from docx import Document
+from docx.opc.constants import RELATIONSHIP_TYPE
+import fitz
 
 console = Console()
 
@@ -48,10 +53,20 @@ class LiveProcess(Thread):
 class File:
     def __init__(self, obj: FileMetadata, last_modified=None, created_at=None):
         self.obj = obj
+        self.name = obj.name
+        self.type = None
+        self.path_lower = obj.path_lower
+        self.path_display = obj.path_display
         self.id = obj.id
         self.size = obj.size
         self.last_modified = last_modified
         self.created_at = created_at
+        self.members = list()
+        self.groups = list()
+        self.content_hash = obj.content_hash
+        self.is_duplicate_in_root = False
+        self.embedded = list()
+        self.linked = list()
 
 
 class Folder:
@@ -80,6 +95,7 @@ class Folder:
         self.sub_folder_non_recursive = 0
         self.sub_folder_recursive = 0
         self.status = "PROCESSING"
+        self.files_content_hash = list()
 
         # For member report
         self.private_count = 0
@@ -156,6 +172,8 @@ class DropBoxApp:
         self.app_key = app_key
         self.app_secret = app_secret
         self.team_access = team_access
+        self.current_thread = 0
+        self.max_thread = 1
         self.dropbox = None
         self.dropbox_team = None
         self.dropbox_team_as_admin = None
@@ -400,7 +418,7 @@ class DropBoxApp:
         self.team_members = self.get_team_member()
         for team_member in self.team_members:
             # print(team_member)
-            team_member_root = Folder(namespace=team_member.name)
+            team_member_root = Folder(namespace=team_member.name.display_name)
             type_ = "Private Folder"
             # Issue: Dropbox currently only return name and path in DeletedMetadata of deleted files and folders.
             team_member_root.update(path='', id_=f'tm:{team_member.team_member_id}', parent=self.root, type_=type_)
@@ -515,8 +533,8 @@ class DropBoxApp:
             'Created Date', 'Last Modified', 'Files', 'Members', 'Groups'
         ])
 
-    def prepare_output_file(self):
-        self.output_file = open(f'output/{self.output_name}.csv', mode='a+', encoding='utf-8', newline='')
+    def prepare_output_file(self, mode='a+'):
+        self.output_file = open(f'output/{self.output_name}.csv', mode=mode, encoding='utf-8', newline='')
         self.output_writer = csv.writer(self.output_file)
 
     @staticmethod
@@ -693,9 +711,10 @@ class DropBoxApp:
                     if not is_backup:
                         folder.add_folder(new_folder)
             if isinstance(content, FileMetadata):
-                # print(content)
+                print(content)
                 content: FileMetadata
                 revisions = client.files_list_revisions(path=content.path_lower).entries
+                client: Dropbox
                 new_file = File(
                     content, last_modified=revisions[0].server_modified, created_at=revisions[-1].server_modified
                 )
@@ -745,25 +764,26 @@ class DropBoxApp:
         display.hrules = 1
         print(display)
 
-        self.prepare_output_file()
+        self.output_name = output_name
+        self.prepare_output_file(mode='w')
         self.output_writer.writerow(['Member', 'Email', 'Private Folder', 'Shared Folder'])
 
-        self.output_name = output_name
         self.root.update(path)
         self.team_members = self.get_team_member()
 
         for team_member in self.team_members:
-            team_member_root = Folder(namespace=team_member.name)
+            team_member_root = Folder(namespace=team_member.name.display_name)
             type_ = "Private Folder"
             team_member_root.update(path='', id_=f'tm:{team_member.team_member_id}', parent=self.root, type_=type_)
             client = self.dropbox_team.as_user(team_member.team_member_id)
             team_member_root = self.count_private_shared(
-                folder=team_member_root, client=client, verify_id=team_member.team_member_id
+                folder=team_member_root, client=client, verify_id=team_member.account_id
             )
-            row = [team_member.name, team_member.email, team_member_root.private_count, team_member_root.shared_count]
+            row = [team_member.name.display_name, team_member.email, team_member_root.private_count,
+                   team_member_root.shared_count]
             self.output_writer.writerow(row)
             row = [
-                self.shorten_text(team_member.name, 35),
+                self.shorten_text(team_member.name.display_name, 35),
                 self.shorten_text(team_member.email, 35),
                 team_member_root.private_count,
                 team_member_root.shared_count
@@ -772,6 +792,13 @@ class DropBoxApp:
             print("\n".join(display.get_string().splitlines()[-2:]))
 
         self.output_file.close()
+        data = [
+            f'Files: {self.root.total_file:,}',
+            f'Folders: {self.root.total_folder:,}',
+            f'Total Size: {self.sizeof_fmt(self.root.size)}',
+            f'Running Time: {self.sec_to_hours(int(time.time() - self.root.tic))}',
+        ]
+        print(' | '.join(data))
 
     def count_private_shared(self, folder, client: Dropbox, verify_id, cursor=None) -> Folder:
 
@@ -795,20 +822,20 @@ class DropBoxApp:
                             folder.shared_count += 1
                             break
                 else:
-                    folder.shared_count += 1
+                    folder.private_count += 1
 
         if contents.has_more:
             return self.count_private_shared(folder=folder, client=client, verify_id=verify_id, cursor=contents.cursor)
 
         return folder
 
-    def member_report(self, output_name, member_indentify, max_level=999, path=''):
+    def member_report(self, output_name, member_indentify, max_level=999, path='', skip_not_root=0):
 
         display = PrettyTable()
         display.field_names = [
             'Type           ',
             'Path                                                                            ',
-            '      Size'
+            '      Size',
             'Level',
         ]
         display.align[display.field_names[0]] = 'l'
@@ -818,34 +845,37 @@ class DropBoxApp:
         display.hrules = 1
         print(display)
 
-        self.prepare_output_file()
-        self.output_writer.writerow(['Member', 'Email', 'Private Folder', 'Shared Folder', 'Level'])
-
         self.output_name = output_name
+        self.prepare_output_file(mode='w')
+        self.output_writer.writerow(['Type', 'Path', 'Size', 'Level'])
+
         self.root.update(path=path, type_="Private Folder")
         self.max_level = max_level
         self.team_members = self.get_team_member()
 
         for team_member in self.team_members:
-            if team_member.name == member_indentify or team_member.email == member_indentify:
-                team_member_root = Folder(namespace=team_member.name)
+            if team_member.name.display_name == member_indentify or team_member.email == member_indentify:
+                team_member_root = Folder(namespace=team_member.name.display_name)
                 type_ = "Private Folder"
                 team_member_root.update(path='', id_=f'tm:{team_member.team_member_id}', parent=self.root, type_=type_)
                 client = self.dropbox_team.as_user(team_member.team_member_id)
                 team_member_root = self.get_private_shared(
-                    display, folder=team_member_root, client=client, verify_id=team_member.account_id, current_level=1
+                    display, folder=team_member_root, client=client, verify_id=team_member.account_id, current_level=1, skip_not_root=skip_not_root
                 )
 
-        folder = self.root
-        row = [folder.type, folder.path_display, folder.size, folder.level]
-        self.output_writer.writerow(row)
-        row = [folder.type, self.shorten_path(folder.path_display, 80), self.sizeof_fmt(folder.size), folder.level]
-        display.add_row(row)
-        print("\n".join(display.get_string().splitlines()[-2:]))
-
         self.output_file.close()
+        self.reverse_output()
 
-    def get_private_shared(self, display, folder=None, current_level=1, client=None, cursor=None, verify_id=None):
+        data = [
+            f'Files: {self.root.total_file:,}',
+            f'Folders: {self.root.total_folder:,}',
+            f'Total Size: {self.sizeof_fmt(self.root.size)}',
+            f'Running Time: {self.sec_to_hours(int(time.time() - self.root.tic))}',
+        ]
+
+        print(' | '.join(data))
+
+    def get_private_shared(self, display, folder=None, current_level=1, client=None, cursor=None, verify_id=None, skip_not_root=0):
 
         self.dropbox.check_and_refresh_access_token()
 
@@ -855,18 +885,17 @@ class DropBoxApp:
             contents: ListFolderResult = client.files_list_folder(path=folder.path_lower)
         else:
             contents: ListFolderResult = client.files_list_folder_continue(cursor=cursor)
-
         for content in contents.entries:
+            print(f'Processing {content.name}', end='')
             if isinstance(content, FolderMetadata):
                 content: FolderMetadata
                 # Child folder will be inherited folder type from the parent
                 new_folder = Folder(obj=content, namespace=folder.namespace, level=current_level, type_=folder.type)
                 new_folder.parent = folder
-                self.update_backup(new_folder)
 
                 # If have id need to verify, is_owner will be set to False by default
                 is_owner = False if verify_id else True
-
+                print('\r', end='')
                 # In case folder didn't sharing info, this folder is owned by this user
                 if not content.shared_folder_id:
                     is_owner = True
@@ -890,9 +919,10 @@ class DropBoxApp:
                                 break
 
                 # Only get report if this user is the folder's owner
-                if is_owner:
-                    new_folder = self.get_private_shared(display=display, folder=new_folder, current_level=current_level + 1,
-                                                         client=client, verify_id=verify_id)
+                if is_owner and not skip_not_root:
+                    new_folder = self.get_private_shared(display=display, folder=new_folder,
+                                                         current_level=current_level + 1,
+                                                         client=client, verify_id=verify_id, skip_not_root=skip_not_root)
                     folder.add_folder(new_folder)
 
             if isinstance(content, FileMetadata):
@@ -900,15 +930,370 @@ class DropBoxApp:
                 content: FileMetadata
                 new_file = File(content)
                 folder.add_file(new_file)
+                print('\r', end='')
         if contents.has_more:
-            return self.get_path(folder=folder, current_level=current_level, client=client, cursor=contents.cursor,
-                                 verify_id=verify_id)
+            return self.get_private_shared(display=display, folder=folder, current_level=current_level,
+                                           client=client, cursor=contents.cursor, verify_id=verify_id)
         else:
             if folder.level <= self.max_level:
-                row = [folder.type, folder.path_display, folder.size]
+                row = [folder.type, folder.path_display, folder.size, folder.level]
                 self.output_writer.writerow(row)
-                row = [folder.type, self.shorten_path(folder.path_display, 80), self.sizeof_fmt(folder.size)]
+                row = [folder.type, self.shorten_path(folder.path_display, 80), self.sizeof_fmt(folder.size),
+                       folder.level]
                 display.add_row(row)
                 print("\n".join(display.get_string().splitlines()[-2:]))
 
         return folder
+
+    def file_report(self, output_name, member_indentify=None, team_indentify=None, max_level=999, path=''):
+
+        display = PrettyTable()
+        display.field_names = [
+            'Name                                    ',
+            'Type  ',
+            '      Size',
+            'Path                                    ',
+            'Path Level',
+            'Members',
+            'Groups',
+            'Created Date',
+            'Last Modified',
+            'Is Duplicate',
+            'Embedded Files',
+            'Linked Files'
+        ]
+        display.align[display.field_names[2]] = 'r'
+        display.align[display.field_names[4]] = 'r'
+        display.align[display.field_names[5]] = 'r'
+        display.align[display.field_names[6]] = 'r'
+        display.align[display.field_names[9]] = 'c'
+        display.align[display.field_names[10]] = 'r'
+        display.align[display.field_names[11]] = 'r'
+        display.hrules = 1
+        print(display)
+
+        self.output_name = output_name
+        self.prepare_output_file(mode='w')
+        self.output_writer.writerow(
+            ['Name', 'Type', 'Size', 'Path', 'Path Level', 'Members', 'Groups', 'Created Date', 'Last Modified',
+             'Duplicate', 'Embedded Files', 'Linked URL', 'Linked Type', 'Linked Name', 'Linked Size'])
+
+        self.root.update(path=path)
+        self.max_level = max_level
+
+        client = report_root = None
+
+        if member_indentify:
+            self.team_members = self.get_team_member()
+
+            for team_member in self.team_members:
+                if team_member.name.display_name == member_indentify or team_member.email == member_indentify:
+                    report_root = Folder(namespace=team_member.name.display_name)
+                    report_root.update(path=path, id_=f'tm:{team_member.team_member_id}', parent=self.root,
+                                       type_="Private Folder")
+                    client = self.dropbox_team.as_user(team_member.team_member_id)
+                    break
+            if not client:
+                print(f"Member ({member_indentify}) not found.")
+        else:
+            self.team_folders = self.get_team_folders()
+            for team_folder in self.team_folders:
+                if team_folder.name == team_indentify or team_folder.name.lower() == team_indentify:
+                    client = self.dropbox_team_as_admin
+                    report_root = Folder(namespace=team_indentify)
+                    report_root.update(path=path, id_=f'tf:{team_indentify}', parent=self.root)
+                    break
+                if not client:
+                    print(f"Team Folder ({team_indentify}) not found.")
+
+        self.output_file.close()
+        self.reverse_output()
+
+        data = [
+            f'Files: {self.root.total_file:,}',
+            f'Folders: {self.root.total_folder:,}',
+            f'Total Size: {self.sizeof_fmt(self.root.size)}',
+            f'Running Time: {self.sec_to_hours(int(time.time() - self.root.tic))}',
+        ]
+
+        print(' | '.join(data))
+
+    def get_file_report(self, display, client, folder=None, current_level=1, cursor=None, verify_id=None):
+        self.dropbox.check_and_refresh_access_token()
+
+        if not cursor:
+            contents: ListFolderResult = client.files_list_folder(path=folder.path_lower)
+        else:
+            contents: ListFolderResult = client.files_list_folder_continue(cursor=cursor)
+
+        for content in contents.entries:
+            print(f'Processing {content.name}', end='')
+            if isinstance(content, FolderMetadata):
+                content: FolderMetadata
+                new_folder = Folder(obj=content, namespace=folder.namespace, level=current_level)
+                new_folder.parent = folder
+
+                # If have id need to verify, is_owner will be set to False by default
+                is_owner = False if verify_id else True
+                print('\r', end='')
+                # In case folder didn't sharing info, this folder is owned by this user
+                if not content.shared_folder_id:
+                    is_owner = True
+                else:
+                    # But if the parent is Member's Personal Space, may child folder is shared folder, verify it now!
+                    if current_level == 1 and folder.type == 'Private Folder':
+                        new_folder.type = "Shared Folder"
+                    r: SharedFolderMembers = client.sharing_list_folder_members(
+                        shared_folder_id=content.shared_folder_id)
+
+                    # Verify if this user is the folder's owner
+                    if verify_id:
+                        member: UserMembershipInfo
+                        for member in r.users:
+                            member_info: UserInfo = member.user
+                            member_access: AccessLevel = member.access_type
+                            if member_info.account_id == verify_id and member_access.is_owner():
+                                is_owner = True
+                                new_folder.shared_count += 1
+                                break
+
+                # Only get report if this user is the folder's owner
+                if is_owner:
+                    new_folder = self.get_file_report(
+                        display=display, client=client, folder=new_folder,
+                        current_level=current_level + 1, verify_id=verify_id
+                    )
+                    folder.add_folder(new_folder)
+            if isinstance(content, FileMetadata):
+                # print(content)
+                content: FileMetadata
+                revisions = client.files_list_revisions(path=content.path_lower).entries
+                new_file = File(
+                    content, last_modified=revisions[0].server_modified, created_at=revisions[-1].server_modified
+                )
+                r: SharedFileMembers = client.sharing_list_file_members(file=content.id)
+
+                for member in r.users:
+                    new_file.members.append(f'({member.access_type._tag[0].upper()}) {member.user.email}')
+                group: GroupMembershipInfo
+                for group in r.groups:
+                    group_info: GroupInfo = group.group
+                    try:
+                        group_members = self.get_group_members(group_id=group_info.group_id)
+                        group_output = (f'({group.access_type._tag[0].upper()}) '
+                                        f'{group_info.group_name}({", ".join(group_members)})')
+                        new_file.groups.append(group_output)
+                    except:
+                        print(f"Can't access group {group_info.group_name}.")
+                        pass
+
+                if new_file.content_hash in self.root.files_content_hash:
+                    new_file.is_duplicate_in_root = True
+                self.root.files_content_hash.append(new_file.content_hash)
+                client: Dropbox
+                print('\r', end='')
+                new_file.type = new_file.name.split('/')[-1].split('.')[-1]
+                if new_file.type in ['docx', 'xlsx', 'pdf']:
+                    if self.max_thread > 1:
+                        is_wait = False
+                        while self.current_thread >= self.max_thread:
+                            if not is_wait:
+                                print(f'Waiting free thread ({self.current_thread}/{self.max_thread})', end='')
+                            time.sleep(.5)
+                            is_wait = True
+                        if is_wait:
+                            print('\r', end='')
+                        Thread(
+                            target=self.file_get_embedded_linked,
+                            args=(folder, new_file, client, current_level, display)
+                        ).start()
+                    else:
+                        self.file_get_embedded_linked(folder, new_file, client, current_level, display)
+                else:
+                    self.log_file_report(folder, new_file, display, current_level)
+
+        if contents.has_more:
+            return self.get_file_report(display=display, client=client, folder=folder, current_level=current_level,
+                                        cursor=contents.cursor, verify_id=verify_id)
+        return folder
+
+    def file_get_embedded_linked(self, folder, file, client, current_level, display):
+        self.current_thread += 1
+        file_local_path = f"tmp/{int(time.time())}-{file.name}"
+
+        if file.type in ['docx', 'xlsx', 'pdf']:
+            print(f'(Thread {self.current_thread}) Downloading {file.name}', end='')
+            client.files_download_to_file(
+                download_path=file_local_path, path=file.path_lower
+            )
+
+        # Get Embedded
+        if file.type in ['docx', 'xlsx']:
+            with ZipFile(file_local_path, "r") as zip:
+                for entry in zip.infolist():
+                    if entry.filename.startswith("word/embeddings/") or entry.filename.startswith(
+                            "xl/embeddings/"):
+                        file.embedded.append(entry.filename.split('/')[-1])
+
+        file_contents = list()
+        # Detect hyperlink or link string in Excel
+        if file.type == 'xlsx':
+            wb = load_workbook(file_local_path, data_only=True)
+            for sheet in wb.worksheets:
+                for row in sheet.iter_rows():
+                    for cell in row:
+                        if cell.value:
+                            value = str(cell.value)
+                            if cell.hyperlink:
+                                if 'dropbox.com/scl' in cell.hyperlink.target:
+                                    value = f'{value}\n{cell.hyperlink.target}'
+                            file_contents.append(value)
+
+        if file.type == 'docx':
+            document = Document(file_local_path)
+            for para in document.paragraphs:
+                file_contents.append(para.text)
+            for table in document.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        for paragraph in cell.paragraphs:
+                            file_contents.append(paragraph.text)
+            rels = document.part.rels
+            for rel in rels:
+                if rels[rel].reltype == RELATIONSHIP_TYPE.HYPERLINK:
+                    file_contents.append(rels[rel]._target)
+
+        if file.type == 'pdf':
+            doc = fitz.open('tmp/pdf.pdf')
+            for page_num in range(doc.page_count):
+                page = doc.load_page(page_num)
+                page_links = page.get_links()
+                for link in page_links:
+                    file_contents.append(link['uri'])
+                file_contents.append(page.get_text().replace('\n', ''))
+
+        urls = re.findall(
+            r'[h]{0,1}t{0,2}p{0,1}[s]{0,1}[:]{0,1}[/]{0,2}[.w]{0,4}dropbox.com/scl[a-z0-9/?=&]+',
+            ' '.join(file_contents)
+        )
+        linked = set()
+        for url in urls:
+            if url[0:7] == "dropbox":
+                linked.add(f'https://{url}')
+            else:
+                if url[0:5] != 'https':
+                    linked.add(url.replace('http', 'https'))
+                else:
+                    linked.add(url)
+        for link in linked:
+            try:
+                link_meta: SharedLinkMetadata = client.sharing_get_shared_link_metadata(url=link)
+                link_info = dict()
+                if isinstance(link_meta, FileLinkMetadata):
+                    link_meta: FileLinkMetadata
+                    link_info = {
+                        'type': 'file',
+                        'url': link,
+                        'name': link_meta.name,
+                        'size': link_meta.size
+                    }
+                    file.linked.append(link_info)
+                if isinstance(link_meta, FolderLinkMetadata):
+                    size = self.get_folder_size(client, link_meta.id)
+                    link_info = {
+                        'type': 'folder',
+                        'url': link,
+                        'name': link_meta.name,
+                        'size': size
+                    }
+                file.linked.append(link_info)
+            except:
+                link_info = {
+                    'type': 'no access',
+                    'url': link,
+                    'name': 'no access',
+                    'size': 'no access'
+                }
+                file.linked.append(link_info)
+
+        os.remove(file_local_path)
+        self.log_file_report(folder, file, display, current_level)
+        self.current_thread -= 1
+
+    def log_file_report(self, folder, file, display, current_level):
+        folder.add_file(file)
+        print('\r', end='')
+
+        last_modified = f'{file.last_modified:%m/%d/%Y}' if file.last_modified else ""
+        created_at = f'{file.created_at:%m/%d/%Y}' if file.created_at else ""
+
+        if file.linked:
+            for file_linked in file.linked:
+                row = [
+                    file.name,
+                    file.name.split('/')[-1].split('.')[-1],
+                    file.size,
+                    file.path_lower,
+                    current_level,
+                    ', '.join(file.members),
+                    ', '.join(file.groups),
+                    created_at,
+                    last_modified,
+                    'Duplicate' if file.is_duplicate_in_root else '',
+                    ', '.join(file.embedded),
+                    file_linked['url'],
+                    file_linked['type'],
+                    file_linked['name'],
+                    file_linked['size'],
+                ]
+                self.output_writer.writerow(row)
+        else:
+            row = [
+                file.name,
+                file.name.split('/')[-1].split('.')[-1],
+                file.size,
+                file.path_lower,
+                current_level,
+                ', '.join(file.members),
+                ', '.join(file.groups),
+                created_at,
+                last_modified,
+                'Duplicate' if file.is_duplicate_in_root else '',
+                ', '.join(file.embedded)
+            ]
+            self.output_writer.writerow(row)
+
+        row = [
+            self.shorten_text(file.name, 40),
+            file.name.split('/')[-1].split('.')[-1],
+            self.sizeof_fmt(file.size),
+            self.shorten_text(file.path_lower, 40),
+            current_level,
+            len(file.members),
+            len(file.groups),
+            created_at,
+            last_modified,
+            'Duplicate' if file.is_duplicate_in_root else '',
+            len(file.embedded),
+            len(file.linked)
+        ]
+        display.add_row(row)
+        print("\n".join(display.get_string().splitlines()[-2:]))
+
+    def get_folder_size(self, client, folder_identification, cursor=None):
+        size = 0
+        if not cursor:
+            contents: ListFolderResult = client.files_list_folder(path=folder_identification)
+        else:
+            contents: ListFolderResult = client.files_list_folder_continue(cursor=cursor)
+
+        for content in contents.entries:
+            if isinstance(content, FolderMetadata):
+                size += self.get_folder_size(client, content.id)
+            if isinstance(content, FileMetadata):
+                size += content.size
+
+        if contents.has_more:
+            size += self.get_folder_size(client, folder_identification, contents.cursor)
+
+        return size
