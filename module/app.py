@@ -945,7 +945,7 @@ class DropBoxApp:
 
         return folder
 
-    def file_report(self, output_name, member_indentify=None, team_indentify=None, max_level=999, path=''):
+    def file_report(self, output_name, member_indentify=None, team_indentify=None, max_level=999, path='', max_thread=1):
 
         display = PrettyTable()
         display.field_names = [
@@ -980,6 +980,7 @@ class DropBoxApp:
 
         self.root.update(path=path)
         self.max_level = max_level
+        self.max_thread = max_thread
 
         client = report_root = None
 
@@ -1005,6 +1006,8 @@ class DropBoxApp:
                     break
                 if not client:
                     print(f"Team Folder ({team_indentify}) not found.")
+
+        self.get_file_report(display=display, client=client, folder=self.root)
 
         self.output_file.close()
         self.reverse_output()

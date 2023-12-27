@@ -16,6 +16,8 @@ parser.add_argument("-m", "--member", type=str, default='',
                     help=f"The identification of selected member (name or email).")
 parser.add_argument("-t", "--team_folder", type=str, default='',
                     help=f"The identification of selected team folder (name).")
+parser.add_argument("-thread", "--thread", type=int, default=1,
+                    help=f"Maximum number of threads running in parallel (Default 1)")
 
 args = parser.parse_args()
 
@@ -33,7 +35,7 @@ if __name__ == "__main__":
 
         app.file_report(
             output_name=args.output_name, member_indentify=args.member,
-            team_indentify=args.team_folder, path=args.path
+            team_indentify=args.team_folder, path=args.path, max_thread=args.thread
         )
 
 
