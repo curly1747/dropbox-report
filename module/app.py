@@ -82,6 +82,7 @@ class Folder:
         self.namespace = namespace
         self.parent_id = None
         self.parent = None
+        self.owner = ''
         self.type = type_
         self.files = list()
         self.members = list()
@@ -169,6 +170,8 @@ class Folder:
 class DropBoxApp:
     def __init__(self, team_access=True, app_key=None, app_secret=None, remember_access_token=True,
                  auto_refresh_access_token=True):
+        self.is_report_owner = False
+        self.team_members_email = list()
         self.app_key = app_key
         self.app_secret = app_secret
         self.team_access = team_access
@@ -312,21 +315,40 @@ class DropBoxApp:
         self.total_folder += 1
         last_modified = f'{folder.last_modified:%m/%d/%Y}' if folder.last_modified else ""
         created_at = f'{folder.created_at:%m/%d/%Y}' if folder.created_at else ""
-        self.result.append((
-            folder.type,
-            folder.namespace,
-            str(folder.level),
-            folder.path_display,
-            self.sizeof_fmt(folder.size),
-            f'{folder.sub_folder_recursive:,}',
-            f'{folder.sub_folder_non_recursive:,}',
-            created_at,
-            last_modified,
-            f'{folder.total_file:,}',
-            str(len(folder.members)),
-            str(len(folder.groups)),
-            f'{folder.exec_time:.1f}'
-        ))
+        if self.is_report_owner:
+            self.result.append((
+                folder.type,
+                folder.namespace,
+                str(folder.level),
+                folder.path_display,
+                self.sizeof_fmt(folder.size),
+                f'{folder.sub_folder_recursive:,}',
+                f'{folder.sub_folder_non_recursive:,}',
+                created_at,
+                last_modified,
+                f'{folder.total_file:,}',
+                str(len(folder.members)),
+                str(len(folder.groups)),
+                f'{folder.exec_time:.1f}'
+            ))
+        else:
+            self.result.append((
+                folder.type,
+                folder.namespace,
+                str(folder.level),
+                folder.path_display,
+                self.sizeof_fmt(folder.size),
+                f'{folder.sub_folder_recursive:,}',
+                f'{folder.sub_folder_non_recursive:,}',
+                created_at,
+                last_modified,
+                f'{folder.total_file:,}',
+                str(len(folder.members)),
+                str(len(folder.groups)),
+                'Team member' if folder.owner in self.team_members_email else "Non team member",
+                folder.owner,
+                f'{folder.exec_time:.1f}'
+            ))
 
     def render_result(self):
         title = [
@@ -348,6 +370,9 @@ class DropBoxApp:
         table.add_column("Files")
         table.add_column("Members")
         table.add_column("Groups")
+        if self.is_report_owner:
+            table.add_column("Owned by")
+            table.add_column("Owner")
         table.add_column("Exec Time (s)")
         rows = list()
         for index, row in enumerate(reversed(self.result)):
@@ -357,11 +382,18 @@ class DropBoxApp:
                 table.add_row('...', '...', '...', '...', '...', '...', '...', '...')
                 break
         for row in reversed(rows):
-            (type_, name_space, level, path, size, sub_folder_r, sub_folder_non_r,
-             created_at, last_modified, files, members, groups, exec_time) = row
-            path = path.replace(self.render_relative_path, '') if self.render_relative_path else path
-            table.add_row(type_, name_space, level, path, size, sub_folder_r, sub_folder_non_r,
-                          created_at, last_modified, files, members, groups, exec_time)
+            if not self.is_report_owner:
+                (type_, name_space, level, path, size, sub_folder_r, sub_folder_non_r,
+                 created_at, last_modified, files, members, groups, exec_time) = row
+                path = path.replace(self.render_relative_path, '') if self.render_relative_path else path
+                table.add_row(type_, name_space, level, path, size, sub_folder_r, sub_folder_non_r,
+                              created_at, last_modified, files, members, groups, exec_time)
+            else:
+                (type_, name_space, level, path, size, sub_folder_r, sub_folder_non_r,
+                 created_at, last_modified, files, members, groups, owned_by, owner, exec_time) = row
+                path = path.replace(self.render_relative_path, '') if self.render_relative_path else path
+                table.add_row(type_, name_space, level, path, size, sub_folder_r, sub_folder_non_r,
+                              created_at, last_modified, files, members, groups, owned_by, owner, exec_time)
         return table
 
     def report_path(self, output_name, path='', max_level=9999):
@@ -373,6 +405,67 @@ class DropBoxApp:
         self.check_backup()
         self.live_process.start()
         self.get_path(folder=self.root)
+        self.status = 'DONE'
+        self.output_file.close()
+        self.reverse_output()
+
+    def report_owner(self, output_name, max_level=9999, running_space=None):
+        path = ''
+        self.is_report_owner = True
+        self.max_level = max_level
+        self.output_name = output_name
+        self.root.update(path)
+        self.root.namespace = self.root.type = 'root'
+        self.check_backup()
+        self.live_process.start()
+
+        self.team_members = self.get_team_member()
+        for team_member in self.team_members:
+            self.team_members_email.append(team_member.email)
+
+        if 'team' in running_space:
+            # 1. Get team folder meta data for mapping in namespace
+            self.team_folders = self.get_team_folders()
+
+            for team_folder in self.team_folders:
+                team_folder_root = Folder(level=1, namespace=team_folder.name)
+                status: TeamFolderStatus = team_folder.status
+                type_ = "Team Folder"
+                if status.is_archived() or status.is_archive_in_progress():
+                    # TODO Check if can get content of archived team folder
+                    continue
+                    type_ = "Archived Team Folder"
+                team_folder_root.update(path=f'/{team_folder.name}', id_=f'ns:{team_folder.team_folder_id}',
+                                        parent=self.root, type_=type_)
+                client = self.dropbox_team_as_admin
+                # print(team_folder)
+                self.get_path(folder=team_folder_root, client=client, current_level=2)
+
+        if 'other' in running_space:
+            # 2. Get namespace from root and run report
+            namespaces = self.get_namespaces(types=['app_folder', 'other'])
+            for namespace in namespaces:
+                namespace_root = Folder(namespace=namespace.name.display_name, level=1)
+                type_ = self.verify_namespace_tag(namespace)
+                # print(namespace)
+                namespace_root.update(path='', id_=f'ns:{namespace.namespace_id}', parent=self.root, type_=type_)
+                client = self.dropbox_team.as_user(namespace.team_member_id)
+                account = client.users_get_current_account()
+                self.get_path(folder=namespace_root, client=client, verify_id=account.account_id, current_level=2)
+
+        if 'member' in running_space:
+            # 3. Get Team Member's Personal Space (Private Folder)
+            for team_member in self.team_members:
+                # print(team_member)
+                team_member_root = Folder(namespace=team_member.name.display_name)
+                type_ = "Private Folder"
+                # Issue: Dropbox currently only return name and path in DeletedMetadata of deleted files and folders.
+                team_member_root.update(path='', id_=f'tm:{team_member.team_member_id}', parent=self.root, type_=type_)
+                client = self.dropbox_team.as_user(team_member.team_member_id)
+                # TODO: Check if only report content that owned by this user (avoid duplicate)
+                self.get_path(folder=team_member_root, client=client, verify_id=team_member.account_id, current_level=2)
+
+        self.record(self.root)
         self.status = 'DONE'
         self.output_file.close()
         self.reverse_output()
@@ -466,20 +559,39 @@ class DropBoxApp:
         created_at = f"{folder.created_at:%Y-%m-%d}" if folder.created_at else ''
         last_modified = f"{folder.last_modified:%Y-%m-%d}" if folder.last_modified else ''
         if folder.level <= self.max_level:
-            self.output_writer.writerow([
-                folder.type,
-                folder.namespace,
-                folder.level,
-                folder.path_display,
-                folder.size,
-                folder.sub_folder_non_recursive,
-                folder.sub_folder_recursive,
-                created_at,
-                last_modified,
-                folder.total_file,
-                ', '.join(folder.members),
-                ', '.join(folder.groups)
-            ])
+            if not self.is_report_owner:
+                self.output_writer.writerow([
+                    folder.type,
+                    folder.namespace,
+                    folder.level,
+                    folder.path_display,
+                    folder.size,
+                    folder.sub_folder_non_recursive,
+                    folder.sub_folder_recursive,
+                    created_at,
+                    last_modified,
+                    folder.total_file,
+                    ', '.join(folder.members),
+                    ', '.join(folder.groups)
+                ])
+            else:
+                self.output_writer.writerow([
+                    folder.type,
+                    folder.namespace,
+                    folder.level,
+                    folder.path_display,
+                    folder.size,
+                    folder.sub_folder_non_recursive,
+                    folder.sub_folder_recursive,
+                    created_at,
+                    last_modified,
+                    folder.total_file,
+                    ', '.join(folder.members),
+                    ', '.join(folder.groups),
+                    'Team member' if folder.owner in self.team_members_email else 'Non team member',
+                    folder.owner
+                ])
+
 
     def record(self, folder: Folder, write_log=True):
         folder.done()
@@ -559,8 +671,11 @@ class DropBoxApp:
         return f"{num:.1f}Yi{suffix}"
 
     @staticmethod
-    def shorten_text(text, max_len):
-        return text if len(text) < max_len else text[0:max_len - 3] + '...'
+    def shorten_text(text, max_len, fill_pad=False):
+        if len(text) < max_len:
+            return text if not fill_pad else text + ' ' * (max_len - len(text))
+        else:
+            return text[0:max_len - 3] + '...'
 
     @staticmethod
     def shorten_path(path: str, max_len):
@@ -696,6 +811,8 @@ class DropBoxApp:
                     if is_owner:
                         for member in r.users:
                             new_folder.members.append(f'({member.access_type._tag[0].upper()}) {member.user.email}')
+                            if member.access_type._tag[0].upper() == "O":
+                                new_folder.owner = member.user.email
                         group: GroupMembershipInfo
                         for group in r.groups:
                             group_info: GroupInfo = group.group
@@ -860,7 +977,8 @@ class DropBoxApp:
                 team_member_root.update(path='', id_=f'tm:{team_member.team_member_id}', parent=self.root, type_=type_)
                 client = self.dropbox_team.as_user(team_member.team_member_id)
                 team_member_root = self.get_private_shared(
-                    display, folder=team_member_root, client=client, verify_id=team_member.account_id, current_level=1, skip_not_root=skip_not_root
+                    display, folder=team_member_root, client=client, verify_id=team_member.account_id, current_level=1,
+                    skip_not_root=skip_not_root
                 )
 
         self.output_file.close()
@@ -875,7 +993,8 @@ class DropBoxApp:
 
         print(' | '.join(data))
 
-    def get_private_shared(self, display, folder=None, current_level=1, client=None, cursor=None, verify_id=None, skip_not_root=0):
+    def get_private_shared(self, display, folder=None, current_level=1, client=None, cursor=None, verify_id=None,
+                           skip_not_root=0):
 
         self.dropbox.check_and_refresh_access_token()
 
@@ -886,7 +1005,7 @@ class DropBoxApp:
         else:
             contents: ListFolderResult = client.files_list_folder_continue(cursor=cursor)
         for content in contents.entries:
-            print(f'Processing {content.name}', end='')
+            print(f'Processing {self.shorten_text(content.name, 40, True)}', end='')
             if isinstance(content, FolderMetadata):
                 content: FolderMetadata
                 # Child folder will be inherited folder type from the parent
@@ -919,11 +1038,13 @@ class DropBoxApp:
                                 break
 
                 # Only get report if this user is the folder's owner
-                if is_owner and not skip_not_root:
-                    new_folder = self.get_private_shared(display=display, folder=new_folder,
-                                                         current_level=current_level + 1,
-                                                         client=client, verify_id=verify_id, skip_not_root=skip_not_root)
-                    folder.add_folder(new_folder)
+                if is_owner:
+                    if skip_not_root and current_level <= 1:
+                        new_folder = self.get_private_shared(display=display, folder=new_folder,
+                                                             current_level=current_level + 1,
+                                                             client=client, verify_id=verify_id,
+                                                             skip_not_root=skip_not_root)
+                        folder.add_folder(new_folder)
 
             if isinstance(content, FileMetadata):
                 # print(content)
@@ -945,22 +1066,23 @@ class DropBoxApp:
 
         return folder
 
-    def file_report(self, output_name, member_indentify=None, team_indentify=None, max_level=999, path='', max_thread=1):
+    def file_report(self, output_name, member_indentify=None, team_indentify=None, max_level=999, path='', max_thread=1,
+                    check_content=1):
 
         display = PrettyTable()
         display.field_names = [
-            'Name                                    ',
+            'Name                ',
             'Type  ',
             '      Size',
-            'Path                                    ',
+            'Path                ',
             'Path Level',
             'Members',
             'Groups',
             'Created Date',
             'Last Modified',
-            'Is Duplicate',
-            'Embedded Files',
-            'Linked Files'
+            'Duplicate',
+            'Embedded',
+            'Linked'
         ]
         display.align[display.field_names[2]] = 'r'
         display.align[display.field_names[4]] = 'r'
@@ -977,8 +1099,7 @@ class DropBoxApp:
         self.output_writer.writerow(
             ['Name', 'Type', 'Size', 'Path', 'Path Level', 'Members', 'Groups', 'Created Date', 'Last Modified',
              'Duplicate', 'Embedded Files', 'Linked URL', 'Linked Type', 'Linked Name', 'Linked Size'])
-
-        self.root.update(path=path)
+        self.root.update(path='' if path == '/' else path)
         self.max_level = max_level
         self.max_thread = max_thread
 
@@ -1007,7 +1128,7 @@ class DropBoxApp:
                 if not client:
                     print(f"Team Folder ({team_indentify}) not found.")
 
-        self.get_file_report(display=display, client=client, folder=self.root)
+        self.get_file_report(display=display, client=client, folder=self.root, check_content=check_content)
 
         self.output_file.close()
         self.reverse_output()
@@ -1021,7 +1142,8 @@ class DropBoxApp:
 
         print(' | '.join(data))
 
-    def get_file_report(self, display, client, folder=None, current_level=1, cursor=None, verify_id=None):
+    def get_file_report(self, display, client, folder=None, current_level=1, cursor=None, verify_id=None,
+                        check_content=1):
         self.dropbox.check_and_refresh_access_token()
 
         if not cursor:
@@ -1030,7 +1152,7 @@ class DropBoxApp:
             contents: ListFolderResult = client.files_list_folder_continue(cursor=cursor)
 
         for content in contents.entries:
-            print(f'Processing {content.name}', end='')
+            print(f'Processing {self.shorten_text(content.name, 40, True)}', end='')
             if isinstance(content, FolderMetadata):
                 content: FolderMetadata
                 new_folder = Folder(obj=content, namespace=folder.namespace, level=current_level)
@@ -1064,7 +1186,7 @@ class DropBoxApp:
                 if is_owner:
                     new_folder = self.get_file_report(
                         display=display, client=client, folder=new_folder,
-                        current_level=current_level + 1, verify_id=verify_id
+                        current_level=current_level + 1, verify_id=verify_id, check_content=check_content
                     )
                     folder.add_folder(new_folder)
             if isinstance(content, FileMetadata):
@@ -1096,7 +1218,7 @@ class DropBoxApp:
                 client: Dropbox
                 print('\r', end='')
                 new_file.type = new_file.name.split('/')[-1].split('.')[-1]
-                if new_file.type in ['docx', 'xlsx', 'pdf']:
+                if check_content and new_file.type in ['docx', 'xlsx', 'pdf']:
                     if self.max_thread > 1:
                         is_wait = False
                         while self.current_thread >= self.max_thread:
@@ -1117,7 +1239,7 @@ class DropBoxApp:
 
         if contents.has_more:
             return self.get_file_report(display=display, client=client, folder=folder, current_level=current_level,
-                                        cursor=contents.cursor, verify_id=verify_id)
+                                        cursor=contents.cursor, verify_id=verify_id, check_content=check_content)
         return folder
 
     def file_get_embedded_linked(self, folder, file, client, current_level, display):
@@ -1167,7 +1289,7 @@ class DropBoxApp:
                     file_contents.append(rels[rel]._target)
 
         if file.type == 'pdf':
-            doc = fitz.open('tmp/pdf.pdf')
+            doc = fitz.open(file_local_path)
             for page_num in range(doc.page_count):
                 page = doc.load_page(page_num)
                 page_links = page.get_links()
@@ -1267,10 +1389,10 @@ class DropBoxApp:
             self.output_writer.writerow(row)
 
         row = [
-            self.shorten_text(file.name, 40),
+            self.shorten_text(file.name, 20),
             file.name.split('/')[-1].split('.')[-1],
             self.sizeof_fmt(file.size),
-            self.shorten_text(file.path_lower, 40),
+            self.shorten_text(file.path_lower, 20),
             current_level,
             len(file.members),
             len(file.groups),
